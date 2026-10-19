@@ -9,7 +9,7 @@ improved, and reverts it if not. Inspired by
 ## Install
 
 ```bash
-claude plugin install autoresearcher --marketplace <owner>/autoresearcher
+claude plugin install autoresearcher --marketplace raphaelDkhn/autoresearcher
 ```
 
 Needs git and Python 3.9+.
@@ -23,21 +23,29 @@ checks them:
 /autoresearcher:new approximate the Mandelbrot set with a small neural network
 ```
 
-Then, in the new project:
+Then, in the new project, start the loop. It runs in a normal Claude Code session until you
+stop it:
 
 ```bash
-claude --permission-mode dontAsk "/autoresearcher:run"   # run the loop
-open .autoresearch/report.html                           # watch progress
-touch .autoresearch/stop                                 # stop after the current run
+caffeinate -is claude --permission-mode dontAsk "/autoresearcher:run"   # run the loop
+open .autoresearch/report.html                                          # watch progress
+touch .autoresearch/stop                                                # stop after the current run
 ```
 
-An API error ends a session. For a long night, restart it automatically:
+`caffeinate` keeps the Mac awake and `dontAsk` turns permission prompts into refusals, so nothing
+waits for you. When you're watching, typing `/autoresearcher:run` in a session works too.
+
+Optional, for a long night: an API error ends a session, so restart it automatically:
 
 ```bash
 caffeinate -is sh -c 'until [ -f .autoresearch/stop ]; do claude -p "/autoresearcher:run" --permission-mode dontAsk; sleep 60; done'
 ```
 
 ## The contract
+
+`/autoresearcher:new` writes `autoresearch.toml`, and every run enforces it, so the agent never
+grades its own work: the plugin reads the metric, keeps or reverts the change, kills runs that
+overrun, and refuses to run if a file outside `editable` changed.
 
 ```toml
 # autoresearch.toml
@@ -66,7 +74,7 @@ gitignore build output (`target/`, `node_modules/`).
   and ask it to adopt the repo.
 - Remote GPU: install Claude Code and the plugin; set `CLAUDE_CODE_OAUTH_TOKEN` (from
   `claude setup-token` on your laptop); clone the project and open it once with `claude`;
-  run the loop above inside `tmux`. Push results with
+  run the long-night loop, minus `caffeinate`, inside `tmux`. Push results with
   `git push origin <branch> 'refs/autoresearch/*:refs/autoresearch/*'`.
 - The plugin checks what changed in the repo. It is not a sandbox: the agent's code runs as
   you.

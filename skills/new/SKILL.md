@@ -104,7 +104,10 @@ Ask the user before the first commit, then
 that the first `claude` launch in the new folder asks them to trust it; until they accept,
 Claude Code ignores the project's `.claude/settings.json`:
 
-- In this session's terminal: `cd <dir> && caffeinate -is claude --permission-mode dontAsk --disallowedTools AskUserQuestion "/autoresearcher:run"`
-- For a long night, restart sessions that end on an API error:
+- Start the loop: `cd <dir> && caffeinate -is claude --permission-mode dontAsk "/autoresearcher:run"`.
+  It runs in a normal session. `caffeinate` keeps a Mac awake (leave it out on Linux), and
+  `dontAsk` turns permission prompts into refusals, so nothing waits for them. When they're
+  watching, typing `/autoresearcher:run` in a session in `<dir>` works too.
+- Optional, for a long night: restart sessions that end on an API error:
   `caffeinate -is sh -c 'until [ -f .autoresearch/stop ]; do claude -p "/autoresearcher:run" --permission-mode dontAsk; sleep 60; done'`
 - Progress: open `.autoresearch/report.html`; it refreshes after every run.
