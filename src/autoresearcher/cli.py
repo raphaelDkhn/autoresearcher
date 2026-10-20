@@ -13,6 +13,7 @@ import argparse
 import contextlib
 import fcntl
 import fnmatch
+import hashlib
 import json
 import math
 import os
@@ -30,14 +31,26 @@ from datetime import datetime
 from importlib import resources
 from pathlib import Path, PurePosixPath
 from types import FrameType
-from typing import Any, TypedDict
+from typing import TYPE_CHECKING, Any, TypedDict
 
 from autoresearcher import report
+
+if TYPE_CHECKING:
+    from importlib.abc import Traversable
 
 MANIFEST = "autoresearch.toml"
 PROGRAM = "program.md"
 NOTES = "notes.md"
 STATE = ".autoresearch"
+# Recursive mode: the agent's research harness, a Harness²-style tree of plain files.
+LAB = "lab"
+STRATEGY = "strategy.md"
+HIDDEN_LAB = "lab.hidden"
+LAB_VERSIONS = "lab-versions"
+LAB_SKIP = ("__pycache__", ".DS_Store")
+STRATEGY_LINES = 80  # strategy.md is read every iteration, so it has a budget
+LAB_MAX_BYTES = 2 * 1024**2
+SKILL_MENTION = re.compile(rf"{LAB}/skills/([\w.-]+\.md)")
 GOALS = ("minimize", "maximize")
 MANIFEST_KEYS = {
     "metric": ("name", "goal", "min_improvement"),
@@ -87,9 +100,7 @@ class Interrupted(BaseException):
     """Raised by the signal handler while an experiment is running."""
 
 
-class Record(TypedDict):
-    """One line of runs.jsonl."""
-
+class _Record(TypedDict):
     id: str
     time: str
     branch: str
@@ -100,6 +111,12 @@ class Record(TypedDict):
     seconds: float
     description: str
     reason: str | None
+
+
+class Record(_Record, total=False):
+    """One line of runs.jsonl."""
+
+    lab: str  # recursive mode: the version of lab/ that chose this run
 
 
 @dataclass(frozen=True)
@@ -142,6 +159,7 @@ class Trial:
     parent: str
     commit: str | None  # None when a baseline ran on HEAD without a new commit
     run_dir: Path
+    lab: str | None  # None in auto mode
 
     @property
     def sha(self) -> str:
@@ -154,6 +172,7 @@ class Trial:
             "description": self.description,
             "parent": self.parent,
             "commit": self.commit,
+            "lab": self.lab,
             "pgid": pgid,
             "started": time.time(),
         }
@@ -544,6 +563,15 @@ def write_lock(fd: int, state: dict[str, Any]) -> None:
         os.pwrite(fd, json.dumps(state).encode(), 0)
 
 
+def settle(root: Path, state: dict[str, Any]) -> None:
+    """Stop what a killed controller left running, then put back the lab/ it had hidden."""
+    if isinstance(state.get("pgid"), int):
+        # shortcut: a dead group's id could in theory be reused by now; compare process start
+        # times if that ever matters.
+        kill_leftovers(state["pgid"])
+    restore_lab(root)
+
+
 def recover(root: Path, fd: int, manifest: Manifest) -> None:
     """Clean up after a controller that was killed (SIGKILL, OOM) in the middle of a run.
 
@@ -551,12 +579,9 @@ def recover(root: Path, fd: int, manifest: Manifest) -> None:
     edits made since; the caller must look at them before running again.
     """
     state = read_lock(fd)
+    settle(root, state)
     if not state:
         return
-    if isinstance(state.get("pgid"), int):
-        # shortcut: a dead group's id could in theory be reused by now; compare process start
-        # times if that ever matters.
-        kill_leftovers(state["pgid"])
     recorded = any(record["id"] == state["id"] for record in read_records(root))
     if not recorded:
         quarantine(root, root / STATE / "runs" / state["id"], spare=manifest.editable)
@@ -575,7 +600,7 @@ def recover(root: Path, fd: int, manifest: Manifest) -> None:
 
 
 def interrupted_record(state: dict[str, Any]) -> Record:
-    return Record(
+    record = Record(
         id=state["id"],
         time=now(),
         branch=state["branch"],
@@ -586,6 +611,152 @@ def interrupted_record(state: dict[str, Any]) -> Record:
         seconds=round(time.time() - state.get("started", time.time()), 1),
         description=state["description"],
         reason="interrupted: the controller was killed during the run",
+    )
+    if state.get("lab"):
+        record["lab"] = state["lab"]
+    return record
+
+
+# Recursive mode: the research harness in lab/ --------------------------------------------
+
+
+def lab_files(root: Path) -> dict[str, bytes] | None:
+    """Read every file in lab/, or return None in auto mode, where there is no lab/."""
+    lab = root / LAB
+    if not lab.is_dir():
+        return None
+    paths = [
+        path
+        for path in sorted(lab.rglob("*"))
+        if path.is_file() and not set(path.relative_to(lab).parts) & set(LAB_SKIP)
+    ]
+    size = sum(path.stat().st_size for path in paths)
+    if size > LAB_MAX_BYTES:
+        raise UsageError(
+            f"{LAB}/ holds {size / 1024**2:.1f} MB, over the limit of "
+            f"{LAB_MAX_BYTES / 1024**2:g} MB. It is for code and notes: write outputs to "
+            "$AUTORESEARCH_RUN_DIR."
+        )
+    return {path.relative_to(lab).as_posix(): path.read_bytes() for path in paths}
+
+
+def check_lab(files: dict[str, bytes]) -> None:
+    """Refuse a research harness that breaks its form, as Harness² validates before a rollout."""
+    if STRATEGY not in files:
+        raise UsageError(
+            f"{LAB}/{STRATEGY} is missing; restore it from {STATE}/{LAB_VERSIONS}/<version>/"
+        )
+    text = files[STRATEGY].decode("utf-8", errors="replace")
+    lines = len(text.splitlines())
+    if lines > STRATEGY_LINES:
+        raise UsageError(
+            f"{LAB}/{STRATEGY} has {lines} lines, over the limit of {STRATEGY_LINES}: it is "
+            f"read every iteration. Move procedures into {LAB}/skills/ and cut what never helped."
+        )
+    skills = {
+        name.split("/", 1)[1]
+        for name in files
+        if name.startswith("skills/") and name.count("/") == 1 and name.endswith(".md")
+    }
+    named = set(SKILL_MENTION.findall(text))
+    problems = [
+        f"{LAB}/skills/{name} is not named in {STRATEGY}" for name in sorted(skills - named)
+    ]
+    problems += [
+        f"{STRATEGY} names {LAB}/skills/{name}, which is missing" for name in sorted(named - skills)
+    ]
+    if problems:
+        raise UsageError(
+            "; ".join(problems) + f". Name each skill in {LAB}/{STRATEGY} with a trigger line, "
+            f"such as 'When <situation>, read {LAB}/skills/<name>.md.'"
+        )
+
+
+def lab_hash(files: dict[str, bytes]) -> str:
+    digest = hashlib.sha256()
+    for name in sorted(files):
+        digest.update(f"{name}\0{len(files[name])}\0".encode())
+        digest.update(files[name])
+    return digest.hexdigest()[:12]
+
+
+def lab_version(root: Path) -> str | None:
+    """Validate lab/, save a copy of each new version, and return its hash; None in auto mode."""
+    files = lab_files(root)
+    if files is None:
+        return None
+    check_lab(files)
+    version = lab_hash(files)
+    saved = root / STATE / LAB_VERSIONS / version
+    if not saved.exists():
+        partial = saved.with_name(f"{version}.partial")
+        shutil.rmtree(partial, ignore_errors=True)
+        for name, data in files.items():
+            (partial / name).parent.mkdir(parents=True, exist_ok=True)
+            (partial / name).write_bytes(data)
+        partial.rename(saved)
+    return version
+
+
+def referee(
+    root: Path,
+    manifest: Manifest,
+    run_dir: Path,
+    signals: Signals,
+    on_spawn: Callable[[int], None],
+) -> Outcome:
+    """Run the harness with lab/ moved aside, so the solution can neither use nor change it."""
+    lab, hidden = root / LAB, root / STATE / HIDDEN_LAB
+    if not lab.is_dir():
+        return execute(root, manifest, run_dir, signals, on_spawn)
+    lab.rename(hidden)
+    try:
+        outcome = execute(root, manifest, run_dir, signals, on_spawn)
+    finally:
+        created = lab.exists() or lab.is_symlink()
+        if created:
+            (run_dir / "stray").mkdir(parents=True, exist_ok=True)
+            shutil.move(lab, run_dir / "stray" / LAB)
+        hidden.rename(lab)
+    if not created:
+        return outcome
+    reason = (
+        f"the run wrote {LAB}/, which is hidden while the harness runs; it was moved to "
+        f"{run_dir.relative_to(root)}/stray/{LAB}"
+    )
+    return Outcome("crash", outcome.seconds, reason)
+
+
+def restore_lab(root: Path) -> None:
+    """Put back a lab/ that a killed controller left hidden."""
+    hidden = root / STATE / HIDDEN_LAB
+    if not hidden.exists():
+        return
+    lab = root / LAB
+    if not lab.exists():
+        hidden.rename(lab)
+        return
+    aside = root / STATE / f"{HIDDEN_LAB}-{datetime.now():%Y%m%d-%H%M%S}"
+    hidden.rename(aside)
+    print(
+        f"autoresearch: warning: {LAB}/ was recreated while a killed run kept it hidden; the "
+        f"hidden copy is in {aside.relative_to(root)}/",
+        file=sys.stderr,
+    )
+
+
+def review_due(root: Path, records: list[Record]) -> bool:
+    """A window of runs just ended and lab/ has not changed since its last run."""
+    if not records or len(records) % report.WINDOW_RUNS:
+        return False
+    files = lab_files(root)
+    return files is not None and records[-1].get("lab") == lab_hash(files)
+
+
+def review_line() -> str:
+    return (
+        f"review due: {report.WINDOW_RUNS} runs since the last review. Run `autoresearch "
+        "review` and follow it before the next experiment."
     )
 
 
@@ -787,14 +958,18 @@ def preflight(root: Path) -> str:
 
 
 def start_trial(root: Path, branch: str, trial_id: str, description: str, baseline: bool) -> Trial:
+    lab = lab_version(root)
     run_dir = root / STATE / "runs" / trial_id
     run_dir.mkdir(parents=True)
+    if lab is not None and (root / NOTES).exists():
+        shutil.copyfile(root / NOTES, run_dir / NOTES)  # what the agent believed when it chose
     parent = head(root)
     created = commit_all(root, description)
     if not created and not baseline:
-        run_dir.rmdir()
+        shutil.rmtree(run_dir)
         raise UsageError("nothing changed since the last run; edit the editable files first")
-    return Trial(trial_id, branch, description, parent, head(root) if created else None, run_dir)
+    commit = head(root) if created else None
+    return Trial(trial_id, branch, description, parent, commit, run_dir, lab)
 
 
 def finish_trial(
@@ -815,6 +990,8 @@ def finish_trial(
         description=trial.description,
         reason=reason,
     )
+    if trial.lab:
+        record["lab"] = trial.lab
     append_record(root, record)
     if verdict != "keep" and trial.commit:
         revert(root, trial)
@@ -872,7 +1049,7 @@ def verdict_details(root: Path, trial: Trial, record: Record) -> list[str]:
     if (trial.run_dir / "stray").exists():
         lines.append(f"  files the run wrote into the repo were moved to {relative}/stray/")
     artifacts = sorted(
-        p.name for p in trial.run_dir.iterdir() if p.name not in ("run.log", "stray")
+        p.name for p in trial.run_dir.iterdir() if p.name not in ("run.log", "stray", NOTES)
     )
     if artifacts:
         more = ", ..." if len(artifacts) > SHOWN_ARTIFACTS else ""
@@ -885,12 +1062,14 @@ def verdict_details(root: Path, trial: Trial, record: Record) -> list[str]:
 
 
 def after_run(root: Path, manifest: Manifest, branch: str) -> None:
-    """Refresh the report and request a stop when every recent run failed."""
+    """Refresh the report, ask for a due review, and request a stop when recent runs all failed."""
     mine = branch_records(root, branch)
     try:
         refresh_report(root, manifest, branch, mine)
     except OSError as exc:
         print(f"autoresearch: warning: could not write the report: {exc}", file=sys.stderr)
+    if review_due(root, mine):
+        print(review_line())
     recent = mine[-FAILURE_LIMIT:]
     if len(recent) == FAILURE_LIMIT and all(r["status"] in ("crash", "timeout") for r in recent):
         reason = (
@@ -925,7 +1104,7 @@ def cmd_run(args: argparse.Namespace) -> int:
             return 130
         trial = start_trial(root, branch, next_id(root, records), description, baseline=not kept)
         write_lock(fd, trial.lock_state())
-        outcome = execute(
+        outcome = referee(
             root,
             manifest,
             trial.run_dir,
@@ -949,13 +1128,14 @@ def cmd_run(args: argparse.Namespace) -> int:
 def cmd_check(_args: argparse.Namespace) -> int:
     root = find_root(Path.cwd())
     manifest = load_manifest(root)
-    with project_lock(root), Signals() as signals:
+    with project_lock(root) as fd, Signals() as signals:
+        settle(root, read_lock(fd))
         run_dir = root / STATE / "check"
         if run_dir.exists():
             shutil.rmtree(run_dir)
         run_dir.mkdir(parents=True)
         before = {path for _, path in dirty_paths(root)}
-        outcome = execute(root, manifest, run_dir, signals, lambda _pid: None)
+        outcome = referee(root, manifest, run_dir, signals, lambda _pid: None)
         parsed = parse_log(run_dir / "run.log", manifest.metric)
         wrote = sorted({path for _, path in dirty_paths(root)} - before)
         status, reason = classify(outcome, parsed, wrote)
@@ -1010,12 +1190,59 @@ def status_text(manifest: Manifest, branch: str, records: list[Record], limit: i
 def cmd_status(args: argparse.Namespace) -> int:
     root = find_root(Path.cwd())
     manifest = load_manifest(root)
+    if (root / STATE / HIDDEN_LAB).exists():
+        # A live run holds the lock and puts lab/ back itself; only a killed one leaves it hidden.
+        with contextlib.suppress(UsageError), project_lock(root) as fd:
+            settle(root, read_lock(fd))
     branch = current_branch(root) or "HEAD"
-    print(status_text(manifest, branch, branch_records(root, branch), args.n))
+    records = branch_records(root, branch)
+    print(status_text(manifest, branch, records, args.n))
     reason = stop_reason(root)
     if reason is not None:
         print(f"STOP REQUESTED: {reason}")
+    if review_due(root, records):
+        print(review_line())
     print(f"notes: {NOTES} · report: {STATE}/report.html")
+    return 0
+
+
+def window_line(window: report.Window) -> str:
+    per_hour = window.gain / (window.seconds / 3600) if window.seconds else 0.0
+    labs = ", ".join(window.labs) or "-"
+    return (
+        f"  #{window.first}-#{window.last}  kept {window.kept}/{window.runs}  failed "
+        f"{window.failed}  gain {window.gain:+.2%}  {per_hour:+.2%} per compute-hour  lab {labs}"
+    )
+
+
+def evidence_text(manifest: Manifest, branch: str, records: list[Record]) -> str:
+    size = report.WINDOW_RUNS
+    last = records[(len(records) - 1) // size * size :] if records else []
+    lines = [
+        "# Evidence",
+        "",
+        status_text(manifest, branch, records, 0),
+        f"Windows of {size} runs (gain: how much the best improved over the window):",
+        *(window_line(window) for window in report.windows(records, manifest.goal, size)),
+        "Runs in the last window:",
+        *(f"{run_line(record)}  lab {record.get('lab', '-')}" for record in last),
+        f"Each lab version is saved in {STATE}/{LAB_VERSIONS}/<version>/, and the notes.md each "
+        f"run was chosen with in {STATE}/runs/<id>/.",
+    ]
+    return "\n".join(lines)
+
+
+def cmd_review(_args: argparse.Namespace) -> int:
+    root = find_root(Path.cwd())
+    manifest = load_manifest(root)
+    if not (root / LAB).is_dir():
+        raise UsageError(
+            f"review belongs to recursive mode, which keeps its research harness in {LAB}/ "
+            "(autoresearch init --recursive)"
+        )
+    branch = current_branch(root) or "HEAD"
+    print(resources.files("autoresearcher").joinpath("review.md").read_text(encoding="utf-8"))
+    print(evidence_text(manifest, branch, branch_records(root, branch)))
     return 0
 
 
@@ -1042,8 +1269,11 @@ def render_manifest(
     )
 
 
-def render_program(manifest: Manifest) -> str:
-    template = resources.files("autoresearcher").joinpath("program.md").read_text(encoding="utf-8")
+def render_program(manifest: Manifest, recursive: bool) -> str:
+    package = resources.files("autoresearcher")
+    template = package.joinpath(PROGRAM).read_text(encoding="utf-8")
+    if recursive:
+        template += "\n" + package.joinpath("recursive.md").read_text(encoding="utf-8")
     values = {
         "metric": manifest.metric,
         "goal_word": "low" if manifest.goal == "minimize" else "high",
@@ -1060,7 +1290,7 @@ def bash_timeout_env(timeout: float) -> dict[str, str]:
     return {"BASH_DEFAULT_TIMEOUT_MS": milliseconds, "BASH_MAX_TIMEOUT_MS": milliseconds}
 
 
-def loop_permissions(editable: tuple[str, ...]) -> list[str]:
+def loop_permissions(editable: tuple[str, ...], recursive: bool) -> list[str]:
     rules = [
         "Bash(autoresearch run *)",
         "Bash(autoresearch status)",
@@ -1075,10 +1305,12 @@ def loop_permissions(editable: tuple[str, ...]) -> list[str]:
         f"Bash(rm -f {STATE}/stop)",
     ]
     rules += [f"Edit(/{path})" for path in (*editable, NOTES, f"{STATE}/stop")]
+    if recursive:
+        rules += [f"Edit(/{LAB}/**)", "Bash(autoresearch review)"]
     return rules
 
 
-def write_claude_settings(root: Path, manifest: Manifest) -> None:
+def write_claude_settings(root: Path, manifest: Manifest, recursive: bool) -> None:
     """Merge the loop's permissions and Bash timeout into .claude/settings.json."""
     path = root / ".claude" / "settings.json"
     try:
@@ -1088,7 +1320,7 @@ def write_claude_settings(root: Path, manifest: Manifest) -> None:
     allow = settings.setdefault("permissions", {}).setdefault("allow", [])
     if not isinstance(allow, list):
         raise UsageError(f"{path}: permissions.allow must be a list")
-    allow += [rule for rule in loop_permissions(manifest.editable) if rule not in allow]
+    allow += [rule for rule in loop_permissions(manifest.editable, recursive) if rule not in allow]
     env = settings.setdefault("env", {})
     for key, value in bash_timeout_env(manifest.timeout).items():
         current = str(env.get(key, ""))
@@ -1098,22 +1330,40 @@ def write_claude_settings(root: Path, manifest: Manifest) -> None:
     path.write_text(json.dumps(settings, indent=2) + "\n", encoding="utf-8")
 
 
-def update_gitignore(root: Path) -> None:
+def update_gitignore(root: Path, ignores: tuple[str, ...]) -> None:
     path = root / ".gitignore"
     text = path.read_text(encoding="utf-8") if path.exists() else ""
-    missing = [line for line in IGNORES if line not in text.splitlines()]
+    missing = [line for line in ignores if line not in text.splitlines()]
     if missing:
         prefix = "" if not text or text.endswith("\n") else "\n"
         addition = prefix + "# autoresearch\n" + "\n".join(missing) + "\n"
         path.write_text(text + addition, encoding="utf-8")
 
 
+def refuse_existing(root: Path, recursive: bool) -> None:
+    hints = {
+        PROGRAM: " (move it aside with `git mv program.md program.orig.md`, then merge it)",
+        LAB: " (recursive mode keeps its research harness there; rename yours first)",
+    }
+    for name in (MANIFEST, PROGRAM, LAB) if recursive else (MANIFEST, PROGRAM):
+        if (root / name).exists():
+            raise UsageError(f"{name} already exists{hints.get(name, '')}")
+
+
+def copy_seed(source: Traversable, target: Path) -> None:
+    target.mkdir(parents=True, exist_ok=True)
+    for entry in source.iterdir():
+        if entry.name in LAB_SKIP:
+            continue
+        if entry.is_dir():
+            copy_seed(entry, target / entry.name)
+        else:
+            (target / entry.name).write_bytes(entry.read_bytes())
+
+
 def cmd_init(args: argparse.Namespace) -> int:
     root = Path.cwd()
-    for name in (MANIFEST, PROGRAM):
-        if (root / name).exists():
-            hint = " (move it aside with `git mv program.md program.orig.md`, then merge it)"
-            raise UsageError(f"{name} already exists" + (hint if name == PROGRAM else ""))
+    refuse_existing(root, args.recursive)
     top = toplevel(root)
     if top is not None and top != root.resolve():
         raise UsageError(f"an autoresearch project must be a git repository root; {top} is")
@@ -1122,12 +1372,15 @@ def cmd_init(args: argparse.Namespace) -> int:
     if top is None:
         git(root, "init", "-q", "-b", "main")
     (root / MANIFEST).write_text(text, encoding="utf-8")
-    (root / PROGRAM).write_text(render_program(manifest), encoding="utf-8")
+    (root / PROGRAM).write_text(render_program(manifest, args.recursive), encoding="utf-8")
     if not (root / NOTES).exists():
         (root / NOTES).write_text(NOTES_SEED, encoding="utf-8")
-    update_gitignore(root)
-    write_claude_settings(root, manifest)
-    print(f"initialized an autoresearch project in {root}")
+    if args.recursive:
+        copy_seed(resources.files("autoresearcher").joinpath(LAB), root / LAB)
+    update_gitignore(root, (*IGNORES, f"{LAB}/") if args.recursive else IGNORES)
+    write_claude_settings(root, manifest, args.recursive)
+    mode = "a recursive-mode" if args.recursive else "an"
+    print(f"initialized {mode} autoresearch project in {root}")
     print("next: fill in the research brief in program.md, run `autoresearch check`, then commit")
     return 0
 
@@ -1147,6 +1400,11 @@ def build_parser() -> argparse.ArgumentParser:
     init.add_argument("--run", dest="run_command", required=True, help="one experiment's command")
     init.add_argument("--editable", required=True, nargs="+", help="globs the agent may change")
     init.add_argument("--timeout", type=float, default=480.0, help="seconds before a run is killed")
+    init.add_argument(
+        "--recursive",
+        action="store_true",
+        help="recursive mode: the agent also improves its research harness in lab/",
+    )
     init.set_defaults(func=cmd_init)
 
     check = sub.add_parser("check", help="run the experiment once as-is, without git or records")
@@ -1159,6 +1417,11 @@ def build_parser() -> argparse.ArgumentParser:
     status = sub.add_parser("status", help="summarize the runs on the current branch")
     status.add_argument("-n", type=int, default=15, help="how many recent runs to list")
     status.set_defaults(func=cmd_status)
+
+    review = sub.add_parser(
+        "review", help="recursive mode: print the review procedure and the evidence for it"
+    )
+    review.set_defaults(func=cmd_review)
 
     return parser
 

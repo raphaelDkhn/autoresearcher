@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 from collections.abc import Callable, Sequence
+from dataclasses import dataclass
 from html import escape
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -14,6 +15,7 @@ if TYPE_CHECKING:
 
 IMAGE_SUFFIXES = (".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg")
 REFRESH_SECONDS = 30
+WINDOW_RUNS = 10  # recursive mode reviews its research harness after each window of runs
 # Chart geometry in viewBox units; the SVG scales to its container.
 WIDTH, HEIGHT = 760, 300
 LEFT, RIGHT, TOP, BOTTOM = 64, 16, 16, 64
@@ -47,6 +49,7 @@ body { margin: 0; background: var(--page); color: var(--ink);
   font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
 main { max-width: 1100px; margin: 0 auto; padding: 24px 16px 48px; }
 h1 { font-size: 20px; margin: 0 0 4px; }
+h2 { font-size: 15px; margin: 0 0 8px; }
 .sub { color: var(--ink-2); margin: 0 0 20px; }
 .skip { position: absolute; left: -9999px; }
 .skip:focus { left: 16px; top: 8px; background: var(--surface); padding: 4px 8px; }
@@ -136,6 +139,7 @@ def render(state_dir: Path, title: str, metric: str, goal: str, records: list[Re
         body += [
             stats(metric, records),
             chart_card(metric, records),
+            harness_card(records, goal),
             table(state_dir, metric, records),
         ]
     else:
@@ -346,6 +350,80 @@ def point(
         f'<g class="pt" tabindex="0" role="img" aria-label="{escape(tip)}" '
         f'data-tip="{escape(tip)}">'
         f'<circle class="hit" cx="{cx:.1f}" cy="{cy:.1f}" r="12"/><g class="mark">{mark}</g></g>'
+    )
+
+
+# Recursive mode -----------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class Window:
+    """How one window of runs went, as the evidence for a review of the research harness."""
+
+    first: str
+    last: str
+    runs: int
+    kept: int
+    failed: int
+    gain: float  # how much the best improved over the window, as a fraction of where it began
+    seconds: float
+    labs: tuple[str, ...]  # versions of lab/ that chose the runs, in order
+
+
+def windows(records: Sequence[Record], goal: str, size: int) -> list[Window]:
+    result = []
+    best: float | None = None
+    for start in range(0, len(records), size):
+        chunk = records[start : start + size]
+        began = best
+        labs: dict[str, None] = {}
+        for record in chunk:
+            value = record["metric"]
+            if record["status"] == "keep" and value is not None:
+                began = value if began is None else began  # the baseline starts the first window
+                best = value
+            if "lab" in record:
+                labs[record["lab"]] = None
+        gain = 0.0
+        if began and best is not None:  # a best of zero has no relative improvement
+            gain = (began - best if goal == "minimize" else best - began) / abs(began)
+        result.append(
+            Window(
+                first=chunk[0]["id"],
+                last=chunk[-1]["id"],
+                runs=len(chunk),
+                kept=sum(r["status"] == "keep" for r in chunk),
+                failed=sum(r["status"] in ("crash", "timeout") for r in chunk),
+                gain=gain,
+                seconds=sum(r["seconds"] for r in chunk),
+                labs=tuple(labs),
+            )
+        )
+    return result
+
+
+def harness_card(records: list[Record], goal: str) -> str:
+    if not any("lab" in record for record in records):
+        return ""
+    rows = []
+    for window in windows(records, goal, WINDOW_RUNS):
+        per_hour = f"{window.gain / (window.seconds / 3600):+.2%}" if window.seconds else ""
+        labs = " ".join(
+            f'<a href="lab-versions/{quote(lab)}/strategy.md"><code>{escape(lab[:7])}</code></a>'
+            for lab in window.labs
+        )
+        rows.append(
+            f"<tr><td>#{escape(window.first)} to #{escape(window.last)}</td>"
+            f'<td class="num">{window.kept}/{window.runs}</td>'
+            f'<td class="num">{window.failed}</td><td class="num">{window.gain:+.2%}</td>'
+            f'<td class="num">{per_hour}</td><td>{labs}</td></tr>'
+        )
+    return (
+        '<div class="card"><h2>Research harness</h2><div class="table-wrap"><table>'
+        '<caption class="skip">Each window of runs and the research harness behind it</caption>'
+        '<thead><tr><th>Runs</th><th class="num">Kept</th><th class="num">Failed</th>'
+        '<th class="num">Gain</th><th class="num">Gain per compute-hour</th>'
+        f"<th>Lab versions</th></tr></thead><tbody>{''.join(rows)}</tbody></table></div></div>"
     )
 
 

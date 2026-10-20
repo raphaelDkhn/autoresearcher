@@ -64,6 +64,19 @@ The command runs one experiment and exits 0. It may write images and logs to
 `$AUTORESEARCH_RUN_DIR`. Anything else it leaves in the repo makes the run a crash, so
 gitignore build output (`target/`, `node_modules/`).
 
+## Recursive mode
+
+Ask `/autoresearcher:new` for recursive mode and the agent also improves how it researches,
+following [Harness²](https://arxiv.org/abs/2610.14224). Its method lives in `lab/`: a short
+strategy it reads every iteration, skills it reads when their trigger fires, and a library of
+lessons. Every 10 runs it reviews that method against numbers the plugin computes. It judges
+its last changes run by run, keeps at most one lesson, has two subagents propose changes (how
+it researches, and what the problem is), and keeps only what the runs support.
+
+The harness that judges runs stays frozen and is the only thing that can keep a change.
+`lab/` is moved aside while it runs, every version of `lab/` is saved in
+`.autoresearch/lab-versions/`, and the report shows how each window of 10 runs went.
+
 ## Notes
 
 - Open a new project in Claude Code once and accept the trust prompt; until then Claude Code
@@ -76,8 +89,8 @@ gitignore build output (`target/`, `node_modules/`).
   `claude setup-token` on your laptop); clone the project and open it once with `claude`;
   run the long-night loop, minus `caffeinate`, inside `tmux`. Push results with
   `git push origin <branch> 'refs/autoresearch/*:refs/autoresearch/*'`.
-- The plugin checks what changed in the repo. It is not a sandbox: the agent's code runs as
-  you.
+- The plugin checks what changed in the repo, and a run that edits its records is undone and
+  stops the loop. It is not a sandbox: the agent's code runs as you.
 
 ## Develop
 

@@ -45,6 +45,9 @@ Ask with AskUserQuestion, skipping whatever the idea already answers:
    candidate.
 5. How the metric could be gamed, and which rules must go in the research brief.
 6. The target directory: a new folder, or the current repo (adopt mode, below).
+7. The mode. Auto, the default: the agent improves the solution. Recursive: it also improves
+   its own research harness in `lab/` (a short strategy, on-demand skills, and a library of
+   lessons) in a review every 10 runs. The harness that judges runs stays frozen either way.
 
 ## 3. Design and write the harness
 
@@ -68,6 +71,8 @@ autoresearch init --metric <name> --goal minimize|maximize \
 autoresearch init --metric ns_per_element --goal minimize \
   --run "cargo run --release --locked --bin bench" --editable "src/sort.rs" --timeout 300
 ```
+
+Add `--recursive` for recursive mode: it also seeds `lab/` and lists it in `.gitignore`.
 
 Fill in the **Research brief** section of the generated `program.md`: the question, how the
 harness measures, which files to read first, the rules that code can't enforce, and the
@@ -111,3 +116,6 @@ Claude Code ignores the project's `.claude/settings.json`:
 - Optional, for a long night: restart sessions that end on an API error:
   `caffeinate -is sh -c 'until [ -f .autoresearch/stop ]; do claude -p "/autoresearcher:run" --permission-mode dontAsk; sleep 60; done'`
 - Progress: open `.autoresearch/report.html`; it refreshes after every run.
+- Recursive mode: the agent keeps its research method in `lab/` and reviews it every 10 runs.
+  The report's "Research harness" card shows each window of runs, and
+  `.autoresearch/lab-versions/` keeps every version of `lab/`.

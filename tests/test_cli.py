@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pytest
 
-from autoresearcher import cli
+from autoresearcher import cli, report
 
 # The toy harness is frozen; its behaviour comes from the editable x.txt, so a test can
 # make "the agent" try a crash, a hang, a fake metric line, and so on.
@@ -70,6 +70,13 @@ if mode == "tamper":
     with open(".autoresearch/runs.jsonl", "a") as handle:
         handle.write('{"forged": true}\n')
     mode = "1"
+if mode == "lab":
+    print(f"lab_visible: {int(os.path.exists('lab'))}")
+    mode = "1"
+if mode == "make-lab":
+    os.makedirs("lab", exist_ok=True)
+    pathlib.Path("lab/planted.txt").write_text("x")
+    mode = "1"
 x = float(mode)
 print("steps: 10")
 print(f"loss:          {(x - 3) ** 2:.6f}")
@@ -123,6 +130,16 @@ def isolated_git(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(cli, "KILL_GRACE", 1.0)
 
 
+def toy_repo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    root = (tmp_path / "proj").resolve()
+    root.mkdir()
+    monkeypatch.chdir(root)
+    (root / "score.py").write_text(SCORE)
+    (root / "x.txt").write_text("0\n")
+    (root / "README").write_text("toy project\n")
+    return root
+
+
 @pytest.fixture
 def make(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Callable[..., Project]:
     def factory(
@@ -133,12 +150,7 @@ def make(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Callable[..., Proje
         min_improvement: float = 0.0,
         commit: bool = True,
     ) -> Project:
-        root = (tmp_path / "proj").resolve()
-        root.mkdir()
-        monkeypatch.chdir(root)
-        (root / "score.py").write_text(SCORE)
-        (root / "x.txt").write_text("0\n")
-        (root / "README").write_text("toy project\n")
+        root = toy_repo(tmp_path, monkeypatch)
         assert cli.main(init_args(goal, timeout, editable)) == 0
         manifest = root / "autoresearch.toml"
         manifest.write_text(
@@ -157,6 +169,15 @@ def make(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Callable[..., Proje
 @pytest.fixture
 def project(make: Callable[..., Project]) -> Project:
     return make()
+
+
+@pytest.fixture
+def lab_project(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Project:
+    root = toy_repo(tmp_path, monkeypatch)
+    assert cli.main([*init_args(), "--recursive"]) == 0
+    git(root, "add", "-A")
+    git(root, "commit", "-qm", "scaffold")
+    return Project(root)
 
 
 def wait_for(path: Path, seconds: float = 20) -> None:
@@ -194,13 +215,16 @@ def test_init_writes_a_complete_project(project: Project) -> None:
     program = (root / "program.md").read_text()
     assert "{{" not in program
     assert "`loss`" in program and "`x.txt`" in program
+    assert "## Recursive mode" not in program
+    assert not (root / "lab").exists()
     assert "## Steering (human)" in (root / "notes.md").read_text()
     ignored = set((root / ".gitignore").read_text().splitlines())
     assert {".autoresearch/", "notes.md", "__pycache__/", ".claude/settings.local.json"} <= ignored
+    assert "lab/" not in ignored
     settings = json.loads((root / ".claude" / "settings.json").read_text())
-    assert {"Bash(autoresearch run *)", "Edit(/x.txt)", "Edit(/notes.md)"} <= set(
-        settings["permissions"]["allow"]
-    )
+    allow = settings["permissions"]["allow"]
+    assert {"Bash(autoresearch run *)", "Edit(/x.txt)", "Edit(/notes.md)"} <= set(allow)
+    assert not [rule for rule in allow if "lab" in rule or "review" in rule]
     assert settings["env"]["BASH_MAX_TIMEOUT_MS"] == "150000"
     assert Path(git(root, "rev-parse", "--show-toplevel")).resolve() == root
 
@@ -759,6 +783,180 @@ def test_head_moving_during_a_run_is_reported(make: Callable[..., Project]) -> N
     assert proc.returncode == 2
     assert "HEAD moved during run #0002" in err
     assert project.records()[-1]["status"] == "timeout"
+
+
+# recursive mode ------------------------------------------------------------------------
+
+
+def test_recursive_init_seeds_the_lab(lab_project: Project) -> None:
+    root = lab_project.root
+    assert (root / "lab" / "strategy.md").read_text().startswith("# Research strategy")
+    assert (root / "lab" / "skills" / "when-stuck.md").exists()
+    assert "lab/" in (root / ".gitignore").read_text().splitlines()
+    allow = json.loads((root / ".claude" / "settings.json").read_text())["permissions"]["allow"]
+    assert {"Edit(/lab/**)", "Bash(autoresearch review)"} <= set(allow)
+    program = (root / "program.md").read_text()
+    assert "## Recursive mode" in program and "{{" not in program
+    assert lab_project.git("status", "--porcelain") == ""
+
+
+def test_recursive_init_refuses_an_existing_lab(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "lab").mkdir()
+    assert cli.main([*init_args(), "--recursive"]) == 2
+    assert "lab already exists" in capsys.readouterr().err
+    assert not (tmp_path / "autoresearch.toml").exists()
+
+
+def test_runs_record_and_save_the_lab_version(lab_project: Project) -> None:
+    lab = lab_project.root / "lab"
+    lab_project.run("baseline")
+    first = lab_project.records()[-1]["lab"]
+    saved = lab_project.state / "lab-versions" / first
+    assert (saved / "strategy.md").read_text() == (lab / "strategy.md").read_text()
+    assert (saved / "skills" / "when-stuck.md").exists()
+    assert (lab_project.run_dir("0001") / "notes.md").exists()
+    with (lab / "library.md").open("a") as handle:
+        handle.write("a lesson\n")
+    lab_project.set_x(1)
+    lab_project.run("next")
+    assert lab_project.records()[-1]["lab"] not in ("", first)
+
+
+def test_auto_mode_records_have_no_lab(project: Project) -> None:
+    project.run("baseline")
+    assert "lab" not in project.records()[-1]
+    assert not (project.run_dir("0001") / "notes.md").exists()
+    assert not (project.state / "lab-versions").exists()
+
+
+def drop_strategy(lab: Path) -> None:
+    (lab / "strategy.md").unlink()
+
+
+def bloat_strategy(lab: Path) -> None:
+    (lab / "strategy.md").write_text("line\n" * (cli.STRATEGY_LINES + 1))
+
+
+def add_unnamed_skill(lab: Path) -> None:
+    (lab / "skills" / "secret.md").write_text("# never named\n")
+
+
+def drop_named_skill(lab: Path) -> None:
+    (lab / "skills" / "when-stuck.md").unlink()
+
+
+@pytest.mark.parametrize(
+    ("change", "message"),
+    [
+        (drop_strategy, "lab/strategy.md is missing"),
+        (bloat_strategy, "81 lines, over the limit of 80"),
+        (add_unnamed_skill, "lab/skills/secret.md is not named in strategy.md"),
+        (drop_named_skill, "names lab/skills/when-stuck.md, which is missing"),
+    ],
+)
+def test_runs_refuse_a_lab_that_breaks_its_form(
+    lab_project: Project,
+    capsys: pytest.CaptureFixture[str],
+    change: Callable[[Path], None],
+    message: str,
+) -> None:
+    change(lab_project.root / "lab")
+    assert lab_project.run("baseline") == 2
+    assert message in capsys.readouterr().err
+    assert lab_project.records() == []
+    assert not (lab_project.state / "runs").exists() or not any(
+        (lab_project.state / "runs").iterdir()
+    )
+
+
+def test_runs_refuse_a_lab_too_big_to_save(
+    lab_project: Project, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(cli, "LAB_MAX_BYTES", 100)
+    assert lab_project.run("baseline") == 2
+    assert "lab/ holds" in capsys.readouterr().err
+
+
+def test_lab_is_hidden_while_the_harness_runs(lab_project: Project) -> None:
+    lab_project.set_x("lab")
+    lab_project.run("baseline")
+    assert lab_project.records()[-1]["metrics"]["lab_visible"] == 0
+    assert (lab_project.root / "lab" / "strategy.md").exists()
+    assert cli.main(["check"]) == 0
+    assert (lab_project.root / "lab" / "strategy.md").exists()
+
+
+def test_a_run_that_writes_lab_crashes(lab_project: Project) -> None:
+    lab_project.run("baseline")
+    lab_project.set_x("make-lab")
+    lab_project.run("plants a lab")
+    record = lab_project.records()[-1]
+    assert record["status"] == "crash"
+    assert record["reason"] is not None and "the run wrote lab/" in record["reason"]
+    assert (lab_project.run_dir(record["id"]) / "stray" / "lab" / "planted.txt").exists()
+    assert not (lab_project.root / "lab" / "planted.txt").exists()
+    assert (lab_project.root / "lab" / "strategy.md").exists()
+
+
+def test_a_killed_run_hides_lab_until_status_or_the_next_run(
+    lab_project: Project, capsys: pytest.CaptureFixture[str]
+) -> None:
+    lab_project.run("baseline")
+    lab_project.set_x("sleep")
+    proc = spawn_cli(lab_project.root, "sleepy")
+    marker = lab_project.run_dir("0002") / "started"
+    wait_for(marker)
+    proc.kill()
+    proc.communicate(timeout=30)
+    assert not (lab_project.root / "lab").exists()
+    assert cli.main(["status"]) == 0
+    assert_group_dead(int(marker.read_text()))
+    assert (lab_project.root / "lab" / "strategy.md").exists()
+    lab_project.set_x(1)
+    assert lab_project.run("next idea") == 2
+    assert "recovered from run #0002" in capsys.readouterr().err
+    assert lab_project.records()[-1]["lab"] == lab_project.records()[0]["lab"]
+
+
+def test_a_review_is_due_after_each_window_until_lab_changes(
+    lab_project: Project, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(report, "WINDOW_RUNS", 2)
+    lab_project.run("baseline")
+    assert "review due" not in capsys.readouterr().out
+    lab_project.set_x(1)
+    lab_project.run("x=1")
+    assert "review due" in capsys.readouterr().out
+    cli.main(["status"])
+    assert "review due" in capsys.readouterr().out
+    with (lab_project.root / "lab" / "reviews.md").open("a") as handle:
+        handle.write("## Review after #0002\n")
+    cli.main(["status"])
+    assert "review due" not in capsys.readouterr().out
+
+
+def test_review_prints_the_procedure_and_the_evidence(
+    lab_project: Project, capsys: pytest.CaptureFixture[str]
+) -> None:
+    lab_project.run("baseline")
+    lab_project.set_x(1)
+    lab_project.run("x=1")
+    capsys.readouterr()
+    assert cli.main(["review"]) == 0
+    out = capsys.readouterr().out
+    assert "# Review the research harness" in out
+    assert "#0001-#0002  kept 2/2  failed 0  gain +55.56%" in out
+    assert "Runs in the last window:" in out and "#0002 keep" in out
+
+
+def test_review_belongs_to_recursive_mode(
+    project: Project, capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert cli.main(["review"]) == 2
+    assert "recursive mode" in capsys.readouterr().err
 
 
 # plugin launcher -----------------------------------------------------------------------
