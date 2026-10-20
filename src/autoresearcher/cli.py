@@ -643,6 +643,35 @@ def execute(
     signals: Signals,
     on_spawn: Callable[[int], None],
 ) -> Outcome:
+    """Run the command, and treat any change it makes to the records as tampering."""
+    path = records_path(root)
+    before = path.read_bytes() if path.exists() else None
+    outcome = run_process(root, manifest, run_dir, signals, on_spawn)
+    after = path.read_bytes() if path.exists() else None
+    if after == before:
+        return outcome
+    if after is not None:
+        (run_dir / f"tampered-{path.name}").write_bytes(after)
+    if before is None:
+        path.unlink()
+    else:
+        path.write_bytes(before)
+    reason = (
+        f"the run changed {path.relative_to(root)}, which only autoresearch writes; it was "
+        f"restored and the changed copy saved in {run_dir.relative_to(root)}/"
+    )
+    request_stop(root, reason)
+    print(f"autoresearch: STOP REQUESTED: {reason}", file=sys.stderr)
+    return Outcome("crash", outcome.seconds, reason)
+
+
+def run_process(
+    root: Path,
+    manifest: Manifest,
+    run_dir: Path,
+    signals: Signals,
+    on_spawn: Callable[[int], None],
+) -> Outcome:
     if signals.received:
         return Outcome("crash", 0.0, f"interrupted by {signal_name(signals.received)}")
     env = {**os.environ, "AUTORESEARCH_RUN_DIR": str(run_dir), "PYTHONUNBUFFERED": "1"}

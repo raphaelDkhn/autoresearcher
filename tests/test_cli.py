@@ -66,6 +66,10 @@ if mode == "touch-tracked":
 if mode == "artifact":
     (run_dir / "plot.png").write_bytes(b"\x89PNG")
     mode = "2"
+if mode == "tamper":
+    with open(".autoresearch/runs.jsonl", "a") as handle:
+        handle.write('{"forged": true}\n')
+    mode = "1"
 x = float(mode)
 print("steps: 10")
 print(f"loss:          {(x - 3) ** 2:.6f}")
@@ -574,6 +578,18 @@ def test_writes_to_tracked_files_are_undone_and_saved(project: Project) -> None:
     patch = project.run_dir(record["id"]) / "stray" / "tracked.patch"
     assert "changed by the run" in patch.read_text()
     assert project.git("status", "--porcelain") == ""
+
+
+def test_a_run_that_edits_the_records_is_undone_and_stops_the_loop(project: Project) -> None:
+    project.run("baseline")
+    project.set_x("tamper")
+    project.run("forges a record")
+    record = project.records()[-1]
+    assert record["status"] == "crash"
+    assert record["reason"] is not None and "runs.jsonl" in record["reason"]
+    assert "forged" not in (project.state / "runs.jsonl").read_text()
+    assert "forged" in (project.run_dir(record["id"]) / "tampered-runs.jsonl").read_text()
+    assert "runs.jsonl" in (project.state / "stop").read_text()
 
 
 def test_consecutive_failures_request_a_stop(
