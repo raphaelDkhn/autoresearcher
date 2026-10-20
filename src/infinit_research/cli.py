@@ -1,9 +1,9 @@
-"""Experiment controller bundled with the autoresearcher Claude Code plugin.
+"""Experiment controller bundled with the infinit research Claude Code plugin.
 
-The controller owns the parts of an autoresearch loop that agents get wrong when they do
+The controller owns the parts of an infinit research loop that agents get wrong when they do
 them by hand: committing each experiment, enforcing the timeout, parsing the metric,
 keeping or reverting, and logging. The agent only edits the files the manifest marks
-editable, then calls ``autoresearch run``; the plugin's bin/ puts that command on its PATH.
+editable, then calls ``infinit-research run``; the plugin's bin/ puts that command on its PATH.
 It runs on any Python 3.9+, so it needs nothing beyond the system interpreter.
 """
 
@@ -33,15 +33,15 @@ from pathlib import Path, PurePosixPath
 from types import FrameType
 from typing import TYPE_CHECKING, Any, TypedDict
 
-from autoresearcher import report
+from infinit_research import report
 
 if TYPE_CHECKING:
     from importlib.abc import Traversable
 
-MANIFEST = "autoresearch.toml"
+MANIFEST = "infinit-research.toml"
 PROGRAM = "program.md"
 NOTES = "notes.md"
-STATE = ".autoresearch"
+STATE = ".infinit-research"
 # Recursive mode: the agent's research harness, a Harness²-style tree of plain files.
 LAB = "lab"
 STRATEGY = "strategy.md"
@@ -138,7 +138,7 @@ class Probe(TypedDict):
 
 @dataclass(frozen=True)
 class Manifest:
-    """The validated contents of autoresearch.toml."""
+    """The validated contents of infinit-research.toml."""
 
     metric: str
     goal: str
@@ -202,7 +202,7 @@ def find_root(start: Path) -> Path:
     for path in (start, *start.parents):
         if (path / MANIFEST).is_file():
             return path
-    raise UsageError(f"no {MANIFEST} in {start} or its parents; run `autoresearch init` first")
+    raise UsageError(f"no {MANIFEST} in {start} or its parents; run `infinit-research init` first")
 
 
 def load_manifest(root: Path) -> Manifest:
@@ -395,11 +395,13 @@ def check_repo(root: Path) -> str:
     if not git_ok(root, "rev-parse", "--verify", "-q", "HEAD"):
         raise UsageError(
             "the repository has no commits; commit the harness first: "
-            "git add -A && git commit -m 'Scaffold autoresearch project'"
+            "git add -A && git commit -m 'Scaffold infinit research project'"
         )
     branch = current_branch(root)
     if branch is None:
-        raise UsageError("HEAD is detached; check out a branch: git switch -c autoresearch/<tag>")
+        raise UsageError(
+            "HEAD is detached; check out a branch: git switch -c infinit-research/<tag>"
+        )
     return branch
 
 
@@ -427,7 +429,7 @@ def guard(root: Path, manifest: Manifest) -> None:
         raise UsageError(
             f"files outside the editable set ({', '.join(manifest.editable)}) changed: "
             f"{summarize(frozen)}. Undo them (git restore <file>, or delete new files). "
-            "Gitignore build output and caches, write other outputs to $AUTORESEARCH_RUN_DIR, "
+            "Gitignore build output and caches, write other outputs to $INFINIT_RESEARCH_RUN_DIR, "
             "and commit program.md edits yourself."
         )
 
@@ -437,8 +439,9 @@ def check_drift(root: Path, kept_commit: str) -> None:
     changed = [path for path in out.split("\0") if path]
     if changed:
         raise UsageError(
-            f"HEAD contains changes no run has evaluated ({', '.join(changed)}). Only "
-            f"`autoresearch run` should commit; undo with `git reset --keep {kept_commit[:7]}`. "
+            f"HEAD contains changes no run has evaluated ({', '.join(changed)}). "
+            "Only `infinit-research run` should commit; "
+            f"undo with `git reset --keep {kept_commit[:7]}`. "
             "If you changed the harness on purpose, start a new branch for a fresh baseline."
         )
 
@@ -454,7 +457,7 @@ def commit_all(root: Path, description: str) -> bool:
 
 def archive_ref(branch: str, run_id: str) -> str:
     # Per branch, because worktrees share refs but each keeps its own run counter.
-    return f"refs/autoresearch/{branch}/{run_id}"
+    return f"refs/infinit-research/{branch}/{run_id}"
 
 
 def changed_files(root: Path, parent: str, commit: str) -> list[str]:
@@ -571,7 +574,7 @@ def project_lock(root: Path) -> Generator[int]:
         try:
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
-            raise UsageError("another autoresearch run or check is in progress here") from None
+            raise UsageError("another infinit-research run or check is in progress here") from None
         yield fd
     finally:
         os.close(fd)
@@ -584,7 +587,7 @@ def read_lock(fd: int) -> dict[str, Any]:
     try:
         return json.loads(raw)
     except json.JSONDecodeError:
-        print("autoresearch: warning: ignoring a corrupt lock file", file=sys.stderr)
+        print("infinit-research: warning: ignoring a corrupt lock file", file=sys.stderr)
         return {}
 
 
@@ -669,7 +672,7 @@ def lab_files(root: Path) -> dict[str, bytes] | None:
         raise UsageError(
             f"{LAB}/ holds {size / 1024**2:.1f} MB, over the limit of "
             f"{LAB_MAX_BYTES / 1024**2:g} MB. It is for code and notes: write outputs to "
-            "$AUTORESEARCH_RUN_DIR."
+            "$INFINIT_RESEARCH_RUN_DIR."
         )
     return {path.relative_to(lab).as_posix(): path.read_bytes() for path in paths}
 
@@ -773,7 +776,7 @@ def restore_lab(root: Path) -> None:
     aside = root / STATE / f"{HIDDEN_LAB}-{datetime.now():%Y%m%d-%H%M%S}"
     hidden.rename(aside)
     print(
-        f"autoresearch: warning: {LAB}/ was recreated while a killed run kept it hidden; the "
+        f"infinit-research: warning: {LAB}/ was recreated while a killed run kept it hidden; the "
         f"hidden copy is in {aside.relative_to(root)}/",
         file=sys.stderr,
     )
@@ -789,7 +792,7 @@ def review_due(root: Path, records: list[Record]) -> bool:
 
 def review_line() -> str:
     return (
-        f"review due: {report.WINDOW_RUNS} runs since the last review. Run `autoresearch "
+        f"review due: {report.WINDOW_RUNS} runs since the last review. Run `infinit-research "
         "review` and follow it before the next experiment."
     )
 
@@ -859,11 +862,11 @@ def execute(
     if not changed:
         return outcome
     reason = (
-        f"the run changed {', '.join(changed)}, which only autoresearch writes; it was "
+        f"the run changed {', '.join(changed)}, which only infinit-research writes; it was "
         f"restored and the changed copy saved in {run_dir.relative_to(root)}/"
     )
     request_stop(root, reason)
-    print(f"autoresearch: STOP REQUESTED: {reason}", file=sys.stderr)
+    print(f"infinit-research: STOP REQUESTED: {reason}", file=sys.stderr)
     return Outcome("crash", outcome.seconds, reason)
 
 
@@ -894,7 +897,7 @@ def run_process(
 ) -> Outcome:
     if signals.received:
         return Outcome("crash", 0.0, f"interrupted by {signal_name(signals.received)}")
-    env = {**os.environ, "AUTORESEARCH_RUN_DIR": str(run_dir), "PYTHONUNBUFFERED": "1"}
+    env = {**os.environ, "INFINIT_RESEARCH_RUN_DIR": str(run_dir), "PYTHONUNBUFFERED": "1"}
     start = time.monotonic()
     with (run_dir / "run.log").open("wb") as log:
         proc = subprocess.Popen(
@@ -966,7 +969,7 @@ def classify(outcome: Outcome, parsed: Parsed, wrote: list[str]) -> tuple[str, s
     if wrote:
         return "crash", (
             f"the run wrote files into the repo ({summarize(wrote)}); gitignore build output "
-            "and caches, and write other outputs to $AUTORESEARCH_RUN_DIR"
+            "and caches, and write other outputs to $INFINIT_RESEARCH_RUN_DIR"
         )
     return "ok", None
 
@@ -1130,7 +1133,7 @@ def after_run(root: Path, manifest: Manifest, branch: str) -> None:
             f"{STATE}/stop to resume."
         )
         request_stop(root, reason)
-        print(f"autoresearch: STOP REQUESTED: {reason}", file=sys.stderr)
+        print(f"infinit-research: STOP REQUESTED: {reason}", file=sys.stderr)
 
 
 def refresh_report(root: Path, manifest: Manifest, branch: str, records: list[Record]) -> None:
@@ -1138,13 +1141,13 @@ def refresh_report(root: Path, manifest: Manifest, branch: str, records: list[Re
     try:
         report.write_report(root / STATE, title, manifest.metric, manifest.goal, records)
     except (OSError, ValueError) as exc:  # ValueError: a probes.jsonl line that is not JSON
-        print(f"autoresearch: warning: could not write the report: {exc}", file=sys.stderr)
+        print(f"infinit-research: warning: could not write the report: {exc}", file=sys.stderr)
 
 
 def cmd_run(args: argparse.Namespace) -> int:
     description = " ".join(args.message.split())
     if not description:
-        raise UsageError("describe the experiment: autoresearch run -m '<what you tried>'")
+        raise UsageError("describe the experiment: infinit-research run -m '<what you tried>'")
     root = find_root(Path.cwd())
     manifest = load_manifest(root)
     with project_lock(root) as fd, Signals() as signals:
@@ -1185,7 +1188,7 @@ def probe_script(root: Path) -> Path:
     if not (root / LAB).is_dir():
         raise UsageError(
             f"probe belongs to recursive mode, which keeps its research harness in {LAB}/ "
-            "(autoresearch init --recursive)"
+            "(infinit-research init --recursive)"
         )
     script = root / LAB / PROBE
     if not script.is_file():
@@ -1199,7 +1202,7 @@ def probe_status(outcome: Outcome, wrote: list[str]) -> tuple[str, str | None]:
     if outcome.status == "ok" and wrote:
         return "crash", (
             f"the probe wrote files into the repo ({summarize(wrote)}); write outputs to "
-            "$AUTORESEARCH_RUN_DIR"
+            "$INFINIT_RESEARCH_RUN_DIR"
         )
     return outcome.status, outcome.reason
 
@@ -1216,7 +1219,7 @@ def probe_line(probe: Probe) -> str:
 def cmd_probe(args: argparse.Namespace) -> int:
     description = " ".join(args.message.split())
     if not description:
-        raise UsageError("describe the probe: autoresearch probe -m '<what it checks>'")
+        raise UsageError("describe the probe: infinit-research probe -m '<what it checks>'")
     root = find_root(Path.cwd())
     manifest = load_manifest(root)
     script = probe_script(root)
@@ -1300,7 +1303,7 @@ def summary_line(manifest: Manifest, branch: str, records: list[Record]) -> str:
 def best_line(records: list[Record]) -> str:
     kept = [record for record in records if record["status"] == "keep"]
     if not kept:
-        return 'no baseline yet: start with `autoresearch run -m "baseline"`'
+        return 'no baseline yet: start with `infinit-research run -m "baseline"`'
     base, best = kept[0], kept[-1]
     assert base["metric"] is not None and best["metric"] is not None
     change = percent(best["metric"], base["metric"]).lstrip(", ")
@@ -1387,10 +1390,10 @@ def cmd_review(_args: argparse.Namespace) -> int:
     if not (root / LAB).is_dir():
         raise UsageError(
             f"review belongs to recursive mode, which keeps its research harness in {LAB}/ "
-            "(autoresearch init --recursive)"
+            "(infinit-research init --recursive)"
         )
     branch = current_branch(root) or "HEAD"
-    print(resources.files("autoresearcher").joinpath("review.md").read_text(encoding="utf-8"))
+    print(resources.files("infinit_research").joinpath("review.md").read_text(encoding="utf-8"))
     probes = [probe for probe in read_probes(root) if probe["branch"] == branch]
     print(evidence_text(manifest, branch, branch_records(root, branch), probes))
     return 0
@@ -1405,7 +1408,8 @@ def render_manifest(
     quote = json.dumps
     globs = ", ".join(quote(glob) for glob in editable)
     return (
-        "# autoresearch manifest. Frozen during a run; change it only when starting a new branch.\n"
+        "# infinit research manifest. Frozen during a run; "
+        "change it only when starting a new branch.\n"
         "[metric]\n"
         f"name = {quote(metric)}  # the run prints this name, a colon, and a number, exactly once\n"
         f"goal = {quote(goal)}\n"
@@ -1420,7 +1424,7 @@ def render_manifest(
 
 
 def render_program(manifest: Manifest, recursive: bool) -> str:
-    package = resources.files("autoresearcher")
+    package = resources.files("infinit_research")
     template = package.joinpath(PROGRAM).read_text(encoding="utf-8")
     if recursive:
         template += "\n" + package.joinpath("recursive.md").read_text(encoding="utf-8")
@@ -1442,9 +1446,9 @@ def bash_timeout_env(timeout: float) -> dict[str, str]:
 
 def loop_permissions(editable: tuple[str, ...], recursive: bool) -> list[str]:
     rules = [
-        "Bash(autoresearch run *)",
-        "Bash(autoresearch status)",
-        "Bash(autoresearch status *)",
+        "Bash(infinit-research run *)",
+        "Bash(infinit-research status)",
+        "Bash(infinit-research status *)",
         "Bash(git status)",
         "Bash(git status *)",
         "Bash(git diff)",
@@ -1456,7 +1460,11 @@ def loop_permissions(editable: tuple[str, ...], recursive: bool) -> list[str]:
     ]
     rules += [f"Edit(/{path})" for path in (*editable, NOTES, f"{STATE}/stop")]
     if recursive:
-        rules += [f"Edit(/{LAB}/**)", "Bash(autoresearch review)", "Bash(autoresearch probe *)"]
+        rules += [
+            f"Edit(/{LAB}/**)",
+            "Bash(infinit-research review)",
+            "Bash(infinit-research probe *)",
+        ]
     return rules
 
 
@@ -1486,7 +1494,7 @@ def update_gitignore(root: Path, ignores: tuple[str, ...]) -> None:
     missing = [line for line in ignores if line not in text.splitlines()]
     if missing:
         prefix = "" if not text or text.endswith("\n") else "\n"
-        addition = prefix + "# autoresearch\n" + "\n".join(missing) + "\n"
+        addition = prefix + "# infinit-research\n" + "\n".join(missing) + "\n"
         path.write_text(text + addition, encoding="utf-8")
 
 
@@ -1516,7 +1524,7 @@ def cmd_init(args: argparse.Namespace) -> int:
     refuse_existing(root, args.recursive)
     top = toplevel(root)
     if top is not None and top != root.resolve():
-        raise UsageError(f"an autoresearch project must be a git repository root; {top} is")
+        raise UsageError(f"an infinit research project must be a git repository root; {top} is")
     text = render_manifest(args.metric, args.goal, args.run_command, args.timeout, args.editable)
     manifest = parse_manifest(text)
     if top is None:
@@ -1526,12 +1534,14 @@ def cmd_init(args: argparse.Namespace) -> int:
     if not (root / NOTES).exists():
         (root / NOTES).write_text(NOTES_SEED, encoding="utf-8")
     if args.recursive:
-        copy_seed(resources.files("autoresearcher").joinpath(LAB), root / LAB)
+        copy_seed(resources.files("infinit_research").joinpath(LAB), root / LAB)
     update_gitignore(root, (*IGNORES, f"{LAB}/") if args.recursive else IGNORES)
     write_claude_settings(root, manifest, args.recursive)
     mode = "a recursive-mode" if args.recursive else "an"
-    print(f"initialized {mode} autoresearch project in {root}")
-    print("next: fill in the research brief in program.md, run `autoresearch check`, then commit")
+    print(f"initialized {mode} infinit research project in {root}")
+    print(
+        "next: fill in the research brief in program.md, run `infinit-research check`, then commit"
+    )
     return 0
 
 
@@ -1540,11 +1550,13 @@ def cmd_init(args: argparse.Namespace) -> int:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="autoresearch", description="Run autoresearch experiments with guardrails."
+        prog="infinit-research", description="Run infinit research experiments with guardrails."
     )
     sub = parser.add_subparsers(dest="command", required=True)
 
-    init = sub.add_parser("init", help="turn the current directory into an autoresearch project")
+    init = sub.add_parser(
+        "init", help="turn the current directory into an infinit research project"
+    )
     init.add_argument("--metric", required=True, help="metric the run prints as 'name: value'")
     init.add_argument("--goal", required=True, choices=GOALS)
     init.add_argument("--run", dest="run_command", required=True, help="one experiment's command")
@@ -1588,7 +1600,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         return args.func(args)
     except UsageError as exc:
-        print(f"autoresearch: error: {exc}", file=sys.stderr)
+        print(f"infinit-research: error: {exc}", file=sys.stderr)
         return 2
 
 

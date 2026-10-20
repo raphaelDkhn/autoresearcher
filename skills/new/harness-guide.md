@@ -11,7 +11,7 @@ The harness can be in any language. The controller only sees a shell command, it
   non-zero.
 - It prints `metric_name: number` exactly once (spaces after the colon are fine). Other
   `key: number` lines are recorded as secondary metrics.
-- `$AUTORESEARCH_RUN_DIR` is a fresh directory per run. Write images, plots, and checkpoints
+- `$INFINIT_RESEARCH_RUN_DIR` is a fresh directory per run. Write images, plots, and checkpoints
   there.
 - Anything else the run leaves in the repo that git can see counts as a stray write: the controller
   moves it aside and marks the run crashed. So the toolchain's build output and caches
@@ -35,13 +35,13 @@ The harness can be in any language. The controller only sees a shell command, it
    before predicting. For speed work, check every output against a frozen reference
    implementation, because the fastest wrong answer is the agent's easiest win.
 5. **Measure the noise.** Fix seeds where results should repeat. For timings, warm up, repeat,
-   and report the median. Then run `autoresearch check` three times and set
+   and report the median. Then run `infinit-research check` three times and set
    `min_improvement` to about twice the relative spread.
 6. **No network during runs.** Download and prepare data once, into a gitignored cache.
 7. **Lock dependencies.** Commit the lockfile and run in locked mode, so a run can't change it:
    `uv run --locked`, `cargo run --locked`, or `npm ci` once and then plain `node`.
 8. **Gitignore build output before the first check,** and warm the build with one
-   `autoresearch check` before a loop, so a cold compile doesn't eat a run's timeout.
+   `infinit-research check` before a loop, so a cold compile doesn't eat a run's timeout.
 9. **Know the hardware.** For GPU work, pick cuda, then mps, then cpu; MPS has no float64.
    For timings, other load on the machine is noise; say so in the brief.
 10. **Save a picture.** A prediction image, an error map, or sample output in the run
@@ -68,7 +68,7 @@ import time
 from pathlib import Path
 
 BUDGET = 120.0  # seconds of training per run
-RUN_DIR = Path(os.environ.get("AUTORESEARCH_RUN_DIR", "."))
+RUN_DIR = Path(os.environ.get("INFINIT_RESEARCH_RUN_DIR", "."))
 
 
 class Context:

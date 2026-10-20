@@ -25,7 +25,7 @@ helped; a run that shows the mechanism does.
 
 ## 3. Propose changes in two scopes
 
-Start two subagents at once and wait for both. Tell each to run `autoresearch review`, to
+Start two subagents at once and wait for both. Tell each to run `infinit-research review`, to
 follow this section for its scope only, and to write nothing but
 `lab/proposals/<scope>.md`. If you cannot start subagents, write both proposals yourself and
 finish one before you start the other.
@@ -59,7 +59,7 @@ the review after it can judge them.
 
 Merge the changes the evidence supports, revise the ones that conflict, adopt one proposal
 whole, keep `lab/` as it is, or restore an earlier version from
-`.autoresearch/lab-versions/<version>/` when later windows drifted from it. Keeping `lab/` as
+`.infinit-research/lab-versions/<version>/` when later windows drifted from it. Keeping `lab/` as
 it is counts as an answer: a change the evidence does not support costs attention and buys
 nothing. Weigh the downside like the upside: a change tied to crashes or a window without
 keeps is unsafe. Log one line per decision in the review:

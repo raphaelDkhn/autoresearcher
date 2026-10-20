@@ -1,4 +1,4 @@
-"""End-to-end tests for the autoresearch controller, on a toy project in a temp directory."""
+"""End-to-end tests for the infinit research controller, on a toy project in a temp directory."""
 
 import json
 import os
@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pytest
 
-from autoresearcher import cli, report
+from infinit_research import cli, report
 
 # The toy harness is frozen; its behaviour comes from the editable x.txt, so a test can
 # make "the agent" try a crash, a hang, a fake metric line, and so on.
@@ -24,7 +24,7 @@ import subprocess
 import sys
 import time
 
-run_dir = pathlib.Path(os.environ.get("AUTORESEARCH_RUN_DIR", "."))
+run_dir = pathlib.Path(os.environ.get("INFINIT_RESEARCH_RUN_DIR", "."))
 mode = pathlib.Path("x.txt").read_text().strip()
 
 
@@ -68,7 +68,7 @@ if mode == "artifact":
     mode = "2"
 if mode in ("tamper", "tamper-probes"):
     name = "runs.jsonl" if mode == "tamper" else "probes.jsonl"
-    with open(f".autoresearch/{name}", "a") as handle:
+    with open(f".infinit-research/{name}", "a") as handle:
         handle.write('{"forged": true}\n')
     mode = "1"
 if mode == "lab":
@@ -92,7 +92,7 @@ def git(root: Path, *args: str) -> str:
 class Project:
     def __init__(self, root: Path) -> None:
         self.root = root
-        self.state = root / ".autoresearch"
+        self.state = root / ".infinit-research"
 
     def set_x(self, value: object) -> None:
         (self.root / "x.txt").write_text(f"{value}\n")
@@ -153,7 +153,7 @@ def make(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Callable[..., Proje
     ) -> Project:
         root = toy_repo(tmp_path, monkeypatch)
         assert cli.main(init_args(goal, timeout, editable)) == 0
-        manifest = root / "autoresearch.toml"
+        manifest = root / "infinit-research.toml"
         manifest.write_text(
             manifest.read_text().replace(
                 "min_improvement = 0.0", f"min_improvement = {min_improvement}"
@@ -200,7 +200,7 @@ def assert_group_dead(pgid: int) -> None:
 
 
 def spawn_cli(root: Path, message: str) -> subprocess.Popen[str]:
-    command = [sys.executable, "-m", "autoresearcher.cli", "run", "-m", message]
+    command = [sys.executable, "-m", "infinit_research.cli", "run", "-m", message]
     return subprocess.Popen(
         command, cwd=root, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
     )
@@ -220,11 +220,16 @@ def test_init_writes_a_complete_project(project: Project) -> None:
     assert not (root / "lab").exists()
     assert "## Steering (human)" in (root / "notes.md").read_text()
     ignored = set((root / ".gitignore").read_text().splitlines())
-    assert {".autoresearch/", "notes.md", "__pycache__/", ".claude/settings.local.json"} <= ignored
+    assert {
+        ".infinit-research/",
+        "notes.md",
+        "__pycache__/",
+        ".claude/settings.local.json",
+    } <= ignored
     assert "lab/" not in ignored
     settings = json.loads((root / ".claude" / "settings.json").read_text())
     allow = settings["permissions"]["allow"]
-    assert {"Bash(autoresearch run *)", "Edit(/x.txt)", "Edit(/notes.md)"} <= set(allow)
+    assert {"Bash(infinit-research run *)", "Edit(/x.txt)", "Edit(/notes.md)"} <= set(allow)
     assert not [rule for rule in allow if "lab" in rule or "review" in rule]
     assert settings["env"]["BASH_MAX_TIMEOUT_MS"] == "150000"
     assert Path(git(root, "rev-parse", "--show-toplevel")).resolve() == root
@@ -238,14 +243,14 @@ def test_init_refuses_to_overwrite_program_md(
     assert cli.main(init_args()) == 2
     assert "git mv program.md" in capsys.readouterr().err
     assert (tmp_path / "program.md").read_text() == "mine\n"
-    assert not (tmp_path / "autoresearch.toml").exists()
+    assert not (tmp_path / "infinit-research.toml").exists()
 
 
 def test_init_refuses_an_existing_project(
     project: Project, capsys: pytest.CaptureFixture[str]
 ) -> None:
     assert cli.main(init_args()) == 2
-    assert "autoresearch.toml already exists" in capsys.readouterr().err
+    assert "infinit-research.toml already exists" in capsys.readouterr().err
 
 
 def test_init_refuses_a_repo_subdirectory(
@@ -270,7 +275,7 @@ def test_init_merges_existing_claude_settings(
     settings = json.loads((tmp_path / ".claude" / "settings.json").read_text())
     assert settings["model"] == "opus"
     assert settings["permissions"]["allow"][0] == "Bash(ls)"
-    assert "Bash(autoresearch run *)" in settings["permissions"]["allow"]
+    assert "Bash(infinit-research run *)" in settings["permissions"]["allow"]
     assert settings["env"] == {
         "BASH_MAX_TIMEOUT_MS": "999999999",
         "BASH_DEFAULT_TIMEOUT_MS": "150000",
@@ -287,7 +292,7 @@ def test_init_rejects_editable_globs_that_are_unsafe(
     monkeypatch.chdir(tmp_path)
     assert cli.main(init_args(editable=(editable,))) == 2
     assert "editable" in capsys.readouterr().err
-    assert not (tmp_path / "autoresearch.toml").exists()
+    assert not (tmp_path / "infinit-research.toml").exists()
 
 
 # run: keep, discard, revert ----------------------------------------------------------
@@ -319,7 +324,7 @@ def test_regression_is_reverted_and_archived(
     assert (record["status"], record["metric"]) == ("discard", 49.0)
     assert project.head() == parent
     assert (project.root / "x.txt").read_text() == "0\n"
-    archived = f"refs/autoresearch/{record['branch']}/{record['id']}"
+    archived = f"refs/infinit-research/{record['branch']}/{record['id']}"
     assert project.git("rev-parse", archived) == record["commit"]
     assert project.git("show", f"{record['commit']}:x.txt") == "10"
     assert f"git restore --source={record['commit'][:7]} -- x.txt" in capsys.readouterr().out
@@ -345,7 +350,7 @@ def test_min_improvement_is_relative_to_the_best(make: Callable[..., Project]) -
 
 
 def test_unknown_manifest_keys_are_rejected(project: Project, capsys: pytest.CaptureFixture[str]):
-    manifest = project.root / "autoresearch.toml"
+    manifest = project.root / "infinit-research.toml"
     manifest.write_text(manifest.read_text().replace("min_improvement", "min_delta"))
     project.git("commit", "-qam", "old manifest")
     assert project.run() == 2
@@ -432,7 +437,7 @@ def test_run_refuses_a_project_below_the_repo_root(
     sub = tmp_path / "proj"
     sub.mkdir()
     manifest = cli.render_manifest("loss", "minimize", "true", 10, ["x.txt"])
-    (sub / "autoresearch.toml").write_text(manifest)
+    (sub / "infinit-research.toml").write_text(manifest)
     git(tmp_path, "add", "-A")
     git(tmp_path, "commit", "-qm", "init")
     monkeypatch.chdir(sub)
@@ -590,7 +595,7 @@ def test_files_written_into_the_repo_are_moved_aside(
     assert record["reason"] is not None and "stray.txt" in record["reason"]
     assert (project.run_dir(record["id"]) / "stray" / "stray.txt").read_text() == "oops"
     assert project.git("status", "--porcelain") == ""
-    assert "moved to .autoresearch/runs/0002/stray/" in capsys.readouterr().out
+    assert "moved to .infinit-research/runs/0002/stray/" in capsys.readouterr().out
 
 
 def test_writes_to_tracked_files_are_undone_and_saved(project: Project) -> None:
@@ -683,7 +688,7 @@ def test_artifacts_are_listed_and_reported(
     project.run("baseline")
     project.set_x("artifact")
     project.run("with a plot")
-    assert "artifacts in .autoresearch/runs/0002/: plot.png" in capsys.readouterr().out
+    assert "artifacts in .infinit-research/runs/0002/: plot.png" in capsys.readouterr().out
     html = (project.state / "report.html").read_text()
     assert 'src="runs/0002/plot.png"' in html
 
@@ -801,7 +806,7 @@ def test_recursive_init_seeds_the_lab(lab_project: Project) -> None:
     assert (root / "lab" / "skills" / "when-stuck.md").exists()
     assert "lab/" in (root / ".gitignore").read_text().splitlines()
     allow = json.loads((root / ".claude" / "settings.json").read_text())["permissions"]["allow"]
-    assert {"Edit(/lab/**)", "Bash(autoresearch review)"} <= set(allow)
+    assert {"Edit(/lab/**)", "Bash(infinit-research review)"} <= set(allow)
     program = (root / "program.md").read_text()
     assert "## Recursive mode" in program and "{{" not in program
     assert lab_project.git("status", "--porcelain") == ""
@@ -814,7 +819,7 @@ def test_recursive_init_refuses_an_existing_lab(
     (tmp_path / "lab").mkdir()
     assert cli.main([*init_args(), "--recursive"]) == 2
     assert "lab already exists" in capsys.readouterr().err
-    assert not (tmp_path / "autoresearch.toml").exists()
+    assert not (tmp_path / "infinit-research.toml").exists()
 
 
 def test_runs_record_and_save_the_lab_version(lab_project: Project) -> None:
@@ -971,7 +976,7 @@ def test_a_probe_runs_the_agents_evaluation_without_committing(
 ) -> None:
     lab_project.run("baseline")
     head = lab_project.head()
-    write_probe(lab_project, 'echo "arg: $1"\necho hi > "$AUTORESEARCH_RUN_DIR/out.txt"\n')
+    write_probe(lab_project, 'echo "arg: $1"\necho hi > "$INFINIT_RESEARCH_RUN_DIR/out.txt"\n')
     lab_project.set_x(1)  # an idea the agent screens before spending a run on it
     capsys.readouterr()
     assert cli.main(["probe", "-m", "screen x=1", "7"]) == 0
@@ -1011,11 +1016,13 @@ def test_probe_belongs_to_recursive_mode(
 
 def test_a_killed_probe_is_cleaned_up_by_the_next_run(lab_project: Project) -> None:
     pgid = f'{shlex.quote(sys.executable)} -c "import os; print(os.getpgid(0))"'
-    marker_tmp = '"$AUTORESEARCH_RUN_DIR/started.tmp"'
+    marker_tmp = '"$INFINIT_RESEARCH_RUN_DIR/started.tmp"'
     # mv makes the marker appear only once it holds the id, so the test never reads it empty
-    script = f'{pgid} > {marker_tmp}\nmv {marker_tmp} "$AUTORESEARCH_RUN_DIR/started"\nsleep 60\n'
+    script = (
+        f'{pgid} > {marker_tmp}\nmv {marker_tmp} "$INFINIT_RESEARCH_RUN_DIR/started"\nsleep 60\n'
+    )
     write_probe(lab_project, script)
-    command = [sys.executable, "-m", "autoresearcher.cli", "probe", "-m", "slow"]
+    command = [sys.executable, "-m", "infinit_research.cli", "probe", "-m", "slow"]
     proc = subprocess.Popen(command, cwd=lab_project.root, stdout=subprocess.PIPE, text=True)
     marker = lab_project.state / "probes" / "0001" / "started"
     wait_for(marker)
@@ -1035,7 +1042,7 @@ def test_review_belongs_to_recursive_mode(
 
 # plugin launcher -----------------------------------------------------------------------
 
-LAUNCHER = Path(__file__).resolve().parent.parent / "bin" / "autoresearch"
+LAUNCHER = Path(__file__).resolve().parent.parent / "bin" / "infinit-research"
 
 
 def test_plugin_launcher_runs_the_bundled_controller(tmp_path: Path) -> None:

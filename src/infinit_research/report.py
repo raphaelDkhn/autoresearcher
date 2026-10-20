@@ -1,4 +1,4 @@
-"""Self-contained HTML report for one autoresearch branch: progress chart, runs table, artifacts."""
+"""Self-contained HTML report for one branch: progress chart, runs table, artifacts."""
 
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING
 from urllib.parse import quote
 
 if TYPE_CHECKING:
-    from autoresearcher.cli import Probe, Record
+    from infinit_research.cli import Probe, Record
 
 IMAGE_SUFFIXES = (".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg")
 REFRESH_SECONDS = 30

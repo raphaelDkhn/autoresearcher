@@ -5,8 +5,8 @@ from pathlib import Path
 
 import pytest
 
-from autoresearcher import report
-from autoresearcher.cli import Probe, Record
+from infinit_research import report
+from infinit_research.cli import Probe, Record
 
 
 def record(
@@ -15,7 +15,7 @@ def record(
     result = Record(
         id=run_id,
         time="2026-10-19T12:00:00+02:00",
-        branch="autoresearch/oct19",
+        branch="infinit-research/oct19",
         commit="abcdef1234567890",
         status=status,
         metric=metric,
@@ -81,7 +81,7 @@ def probe(probe_id: str, runs: int, description: str = "quick check") -> Probe:
     return Probe(
         id=probe_id,
         time="2026-10-19T12:00:00+02:00",
-        branch="autoresearch/oct19",
+        branch="infinit-research/oct19",
         head="abcdef1234567890",
         lab="aaa",
         runs=runs,

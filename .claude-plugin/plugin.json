@@ -1,6 +1,6 @@
 {
-  "name": "autoresearcher",
-  "description": "Create and run autoresearch projects: an agent edits code, a frozen harness measures it, and a bundled controller keeps or reverts each experiment.",
+  "name": "infinit-research",
+  "description": "Create and run infinit research projects: an agent edits code, a frozen harness measures it, and a bundled controller keeps or reverts each experiment.",
   "version": "0.1.0",
   "author": {
     "name": "raphaelDkhn"

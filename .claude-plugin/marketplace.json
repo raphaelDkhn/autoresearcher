@@ -1,14 +1,14 @@
 {
-  "name": "autoresearcher",
-  "description": "A plugin that creates autoresearch projects and runs their experiment loop.",
+  "name": "infinit-research",
+  "description": "A plugin that creates infinit research projects and runs their experiment loop.",
   "owner": {
     "name": "raphaelDkhn"
   },
   "plugins": [
     {
-      "name": "autoresearcher",
+      "name": "infinit-research",
       "source": "./",
-      "description": "Create and run autoresearch projects with a bundled controller that owns git, timeouts, and the metric."
+      "description": "Create and run infinit research projects with a bundled controller that owns git, timeouts, and the metric."
     }
   ]
 }

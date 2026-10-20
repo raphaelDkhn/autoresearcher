@@ -1,5 +1,5 @@
 [project]
-name = "autoresearcher"
+name = "infinit-research"
 version = "0.1.0"
 description = "Claude Code plugin for autoresearch-style experiment loops"
 readme = "README.md"

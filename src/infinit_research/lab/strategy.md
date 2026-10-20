@@ -16,7 +16,7 @@ short: procedures with a clear trigger go in `lab/skills/`, named here.
 
 - Change one thing per run, so the verdict says what mattered.
 - Make the candidate print diagnostics as `name: value` lines and save pictures to
-  `$AUTORESEARCH_RUN_DIR`, so a discard still teaches you something.
+  `$INFINIT_RESEARCH_RUN_DIR`, so a discard still teaches you something.
 - Bracket a numeric knob with values 2 to 4 times apart instead of nudging it.
 - After a large win, ablate it: remove its parts one at a time to find what carried it.
 

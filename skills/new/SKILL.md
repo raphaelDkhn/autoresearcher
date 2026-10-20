@@ -1,19 +1,19 @@
 ---
 name: new
-description: Create a new autoresearch project from a research idea, or turn an existing repo into one. Designs a frozen harness that measures one metric under a fixed time budget, a simple editable baseline, and the autoresearch.toml contract, then validates it with `autoresearch check`. Use when the user wants to set up autoresearch, an autonomous experiment loop, or an agent that optimizes something overnight.
+description: Create a new infinit research project from a research idea, or turn an existing repo into one. Designs a frozen harness that measures one metric under a fixed time budget, a simple editable baseline, and the infinit-research.toml contract, then validates it with `infinit-research check`. Use when the user wants to set up autoresearch, an autonomous experiment loop, or an agent that optimizes something overnight.
 argument-hint: "[research idea]"
 ---
 
-# Create an autoresearch project
+# Create an infinit research project
 
-An autoresearch project has three parts:
+An infinit research project has three parts:
 
 - a **frozen harness** that runs one experiment within a fixed time budget and prints one metric,
 - an **editable candidate** that the research agent improves, run after run,
-- **`autoresearch.toml`**, which tells the bundled `autoresearch` command how to run, measure,
-  and judge.
+- **`infinit-research.toml`**, which tells the bundled `infinit-research` command how to run,
+  measure, and judge.
 
-The `autoresearch` command that ships with this plugin owns commits, timeouts, metric
+The `infinit-research` command that ships with this plugin owns commits, timeouts, metric
 parsing, keep/revert, and the log. Your job here is the
 harness. An agent will run a hundred experiments against it with nobody watching; any gap it
 leaves, the loop will eventually find.
@@ -22,7 +22,7 @@ Idea: $ARGUMENTS
 
 ## 1. Preflight
 
-- `autoresearch --help` must work. The plugin provides it and runs it on the system Python
+- `infinit-research --help` must work. The plugin provides it and runs it on the system Python
   3.9+; if it fails, ask the user to install Python 3 and stop.
 - Detect the hardware: `nvidia-smi -L` (CUDA), `uname -sm` (Darwin arm64 means Apple
   Silicon, so PyTorch `mps`), otherwise CPU. Note the memory too.
@@ -68,10 +68,10 @@ Read [harness-guide.md](harness-guide.md) and follow it. Then write:
 Then initialize, choosing `--timeout` at about twice the budget plus startup and build time:
 
 ```bash
-autoresearch init --metric <name> --goal minimize|maximize \
+infinit-research init --metric <name> --goal minimize|maximize \
   --run "uv run --locked python -m harness.evaluate" --editable "solution.py" --timeout 480
 # or, for a Rust benchmark:
-autoresearch init --metric ns_per_element --goal minimize \
+infinit-research init --metric ns_per_element --goal minimize \
   --run "cargo run --release --locked --bin bench" --editable "src/sort.rs" --timeout 300
 ```
 
@@ -85,17 +85,17 @@ hardware. Leave the rest of `program.md` as generated.
 
 Same steps, but write only what is missing. For a clone of karpathy/autoresearch:
 `git mv program.md program.orig.md`, then
-`autoresearch init --metric val_bpb --goal minimize --run "uv run train.py" --editable train.py --timeout 600`,
+`infinit-research init --metric val_bpb --goal minimize --run "uv run train.py" --editable train.py --timeout 600`,
 merge the goal and rules of `program.orig.md` into the brief, and delete it. Upstream needs an
 NVIDIA GPU; on a Mac, start from an MLX or MPS fork instead.
 
 ## 4. Validate
 
-1. `autoresearch check`. The first run also installs, builds, and warms caches. It must print
+1. `infinit-research check`. The first run also installs, builds, and warms caches. It must print
    `check ok` and leave `git status` unchanged. If it reports that the run wrote files into
    the repo and they are build output or caches, add them to `.gitignore` and check again.
-2. Run `autoresearch check` twice more and compare the metric. Set `min_improvement` in
-   `autoresearch.toml` to about twice the relative spread, (max - min) / mean, or leave it at
+2. Run `infinit-research check` twice more and compare the metric. Set `min_improvement` in
+   `infinit-research.toml` to about twice the relative spread, (max - min) / mean, or leave it at
    0 when the runs are identical. It is a fraction of the best, so the bar shrinks as the
    metric improves. In recursive mode the two checks must also print different `eval_seed`
    values; matching seeds mean a fixed evaluation set, so draw it fresh or use auto mode.
@@ -109,17 +109,17 @@ NVIDIA GPU; on a Mac, start from an MLX or MPS fork instead.
 ## 5. Hand off
 
 Ask the user before the first commit, then
-`git add -A && git commit -m "Scaffold autoresearch project"`. Tell them how to start, and
+`git add -A && git commit -m "Scaffold infinit research project"`. Tell them how to start, and
 that the first `claude` launch in the new folder asks them to trust it; until they accept,
 Claude Code ignores the project's `.claude/settings.json`:
 
-- Start the loop: `cd <dir> && caffeinate -is claude --permission-mode dontAsk "/autoresearcher:run"`.
+- Start the loop: `cd <dir> && caffeinate -is claude --permission-mode dontAsk "/infinit-research:run"`.
   It runs in a normal session. `caffeinate` keeps a Mac awake (leave it out on Linux), and
   `dontAsk` turns permission prompts into refusals, so nothing waits for them. When they're
-  watching, typing `/autoresearcher:run` in a session in `<dir>` works too.
+  watching, typing `/infinit-research:run` in a session in `<dir>` works too.
 - Optional, for a long night: restart sessions that end on an API error:
-  `caffeinate -is sh -c 'until [ -f .autoresearch/stop ]; do claude -p "/autoresearcher:run" --permission-mode dontAsk; sleep 60; done'`
-- Progress: open `.autoresearch/report.html`; it refreshes after every run.
+  `caffeinate -is sh -c 'until [ -f .infinit-research/stop ]; do claude -p "/infinit-research:run" --permission-mode dontAsk; sleep 60; done'`
+- Progress: open `.infinit-research/report.html`; it refreshes after every run.
 - Recursive mode: the agent keeps its research method in `lab/` and reviews it every 10 runs.
   The report's "Research harness" card shows each window of runs, and
-  `.autoresearch/lab-versions/` keeps every version of `lab/`.
+  `.infinit-research/lab-versions/` keeps every version of `lab/`.
