@@ -50,8 +50,10 @@ already says. Commit to the most defensible version of your scope; the next step
 ## 4. Check what you can
 
 Check each proposed fact against the runs it cites: their `run.log`, artifacts, and the copy
-of `notes.md` each run was chosen with. Changes to how you research are tested by the next
-window, so the review after it can judge them.
+of `notes.md` each run was chosen with. Check a new or changed evaluation on candidates the
+harness already judged, as `lab/skills/new-evaluation.md` describes: keep it only if it ranks
+them as the harness did. Other changes to how you research are tested by the next window, so
+the review after it can judge them.
 
 ## 5. Compose the next version
 

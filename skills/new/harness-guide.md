@@ -49,6 +49,10 @@ The harness can be in any language. The controller only sees a shell command, it
 11. **Write down what code can't enforce.** Rules such as "stay a general-purpose learner" or
     "no hard-coded answers" go in the research brief, where the agent reads them every
     iteration.
+12. **Recursive mode: fresh evaluation data every run.** The agent writes its own
+    evaluations, and its code can read any file in the project, so it could learn a fixed
+    evaluation set through them. Draw evaluation inputs from a seed taken from `os.urandom`
+    or the clock, never from a file, and print the seed once as `eval_seed: <n>`.
 
 ## Sketch: learn a function (Python, fit/predict)
 

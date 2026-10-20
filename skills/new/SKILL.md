@@ -46,8 +46,11 @@ Ask with AskUserQuestion, skipping whatever the idea already answers:
 5. How the metric could be gamed, and which rules must go in the research brief.
 6. The target directory: a new folder, or the current repo (adopt mode, below).
 7. The mode. Auto, the default: the agent improves the solution. Recursive: it also improves
-   its own research harness in `lab/` (a short strategy, on-demand skills, and a library of
-   lessons) in a review every 10 runs. The harness that judges runs stays frozen either way.
+   its own research harness in `lab/` (a short strategy, on-demand skills, its own
+   evaluations, and a library of lessons) in a review every 10 runs. The harness that judges
+   runs stays frozen either way. Recursive mode needs evaluation data drawn fresh every run
+   ([harness-guide.md](harness-guide.md), rule 12): the agent's own evaluations can read any
+   file in the project, so a fixed validation set, such as a val shard, stays in auto mode.
 
 ## 3. Design and write the harness
 
@@ -94,7 +97,8 @@ NVIDIA GPU; on a Mac, start from an MLX or MPS fork instead.
 2. Run `autoresearch check` twice more and compare the metric. Set `min_improvement` in
    `autoresearch.toml` to about twice the relative spread, (max - min) / mean, or leave it at
    0 when the runs are identical. It is a fraction of the best, so the bar shrinks as the
-   metric improves.
+   metric improves. In recursive mode the two checks must also print different `eval_seed`
+   values; matching seeds mean a fixed evaluation set, so draw it fresh or use auto mode.
 3. Floor: temporarily swap in a trivial candidate (a constant, a no-op). `check` must score
    clearly worse. Restore the real one.
 4. Leak: temporarily make the candidate read the evaluation data or call the oracle after

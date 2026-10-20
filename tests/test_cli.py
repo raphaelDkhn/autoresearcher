@@ -66,8 +66,9 @@ if mode == "touch-tracked":
 if mode == "artifact":
     (run_dir / "plot.png").write_bytes(b"\x89PNG")
     mode = "2"
-if mode == "tamper":
-    with open(".autoresearch/runs.jsonl", "a") as handle:
+if mode in ("tamper", "tamper-probes"):
+    name = "runs.jsonl" if mode == "tamper" else "probes.jsonl"
+    with open(f".autoresearch/{name}", "a") as handle:
         handle.write('{"forged": true}\n')
     mode = "1"
 if mode == "lab":
@@ -604,16 +605,22 @@ def test_writes_to_tracked_files_are_undone_and_saved(project: Project) -> None:
     assert project.git("status", "--porcelain") == ""
 
 
-def test_a_run_that_edits_the_records_is_undone_and_stops_the_loop(project: Project) -> None:
+@pytest.mark.parametrize(
+    ("mode", "name"), [("tamper", "runs.jsonl"), ("tamper-probes", "probes.jsonl")]
+)
+def test_a_run_that_edits_the_records_is_undone_and_stops_the_loop(
+    project: Project, mode: str, name: str
+) -> None:
     project.run("baseline")
-    project.set_x("tamper")
+    project.set_x(mode)
     project.run("forges a record")
     record = project.records()[-1]
     assert record["status"] == "crash"
-    assert record["reason"] is not None and "runs.jsonl" in record["reason"]
-    assert "forged" not in (project.state / "runs.jsonl").read_text()
-    assert "forged" in (project.run_dir(record["id"]) / "tampered-runs.jsonl").read_text()
-    assert "runs.jsonl" in (project.state / "stop").read_text()
+    assert record["reason"] is not None and name in record["reason"]
+    target = project.state / name
+    assert not target.exists() or "forged" not in target.read_text()
+    assert "forged" in (project.run_dir(record["id"]) / f"tampered-{name}").read_text()
+    assert name in (project.state / "stop").read_text()
 
 
 def test_consecutive_failures_request_a_stop(
@@ -942,14 +949,81 @@ def test_review_prints_the_procedure_and_the_evidence(
     lab_project: Project, capsys: pytest.CaptureFixture[str]
 ) -> None:
     lab_project.run("baseline")
+    write_probe(lab_project, 'echo "quick: 4"\n')
+    cli.main(["probe", "-m", "screen x=1"])
     lab_project.set_x(1)
     lab_project.run("x=1")
     capsys.readouterr()
     assert cli.main(["review"]) == 0
     out = capsys.readouterr().out
     assert "# Review the research harness" in out
-    assert "#0001-#0002  kept 2/2  failed 0  gain +55.56%" in out
+    assert "#0001-#0002  kept 2/2  failed 0  probes 1  gain +55.56%" in out
     assert "Runs in the last window:" in out and "#0002 keep" in out
+    assert "probe #0001 ok       quick=4" in out
+
+
+def write_probe(project: Project, body: str) -> None:
+    (project.root / "lab" / "probe.sh").write_text(body)
+
+
+def test_a_probe_runs_the_agents_evaluation_without_committing(
+    lab_project: Project, capsys: pytest.CaptureFixture[str]
+) -> None:
+    lab_project.run("baseline")
+    head = lab_project.head()
+    write_probe(lab_project, 'echo "arg: $1"\necho hi > "$AUTORESEARCH_RUN_DIR/out.txt"\n')
+    lab_project.set_x(1)  # an idea the agent screens before spending a run on it
+    capsys.readouterr()
+    assert cli.main(["probe", "-m", "screen x=1", "7"]) == 0
+    out = capsys.readouterr().out
+    assert "probe #0001 ok" in out and "arg=7" in out and "out.txt" in out
+    (probe,) = cli.read_probes(lab_project.root)
+    assert (probe["status"], probe["metrics"], probe["runs"]) == ("ok", {"arg": 7.0}, 1)
+    assert (lab_project.state / "lab-versions" / probe["lab"] / "probe.sh").exists()
+    assert lab_project.head() == head
+    assert (lab_project.root / "x.txt").read_text() == "1\n"
+    assert len(lab_project.records()) == 1
+
+
+def test_a_probe_that_writes_into_the_repo_is_undone(lab_project: Project) -> None:
+    write_probe(lab_project, "echo oops > stray.txt\necho 2 > x.txt\n")
+    assert cli.main(["probe", "-m", "messy"]) == 0
+    (probe,) = cli.read_probes(lab_project.root)
+    assert probe["status"] == "crash"
+    assert probe["reason"] is not None and "stray.txt" in probe["reason"]
+    assert not (lab_project.root / "stray.txt").exists()
+    assert (lab_project.root / "x.txt").read_text() == "2\n"  # editable, so the probe may tune it
+
+
+def test_probe_needs_a_probe_script(
+    lab_project: Project, capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert cli.main(["probe", "-m", "nothing to run"]) == 2
+    assert "write lab/probe.sh first" in capsys.readouterr().err
+
+
+def test_probe_belongs_to_recursive_mode(
+    project: Project, capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert cli.main(["probe", "-m", "no lab"]) == 2
+    assert "recursive mode" in capsys.readouterr().err
+
+
+def test_a_killed_probe_is_cleaned_up_by_the_next_run(lab_project: Project) -> None:
+    pgid = f'{shlex.quote(sys.executable)} -c "import os; print(os.getpgid(0))"'
+    marker_tmp = '"$AUTORESEARCH_RUN_DIR/started.tmp"'
+    # mv makes the marker appear only once it holds the id, so the test never reads it empty
+    script = f'{pgid} > {marker_tmp}\nmv {marker_tmp} "$AUTORESEARCH_RUN_DIR/started"\nsleep 60\n'
+    write_probe(lab_project, script)
+    command = [sys.executable, "-m", "autoresearcher.cli", "probe", "-m", "slow"]
+    proc = subprocess.Popen(command, cwd=lab_project.root, stdout=subprocess.PIPE, text=True)
+    marker = lab_project.state / "probes" / "0001" / "started"
+    wait_for(marker)
+    proc.kill()
+    proc.communicate(timeout=30)
+    assert lab_project.run("baseline") == 0
+    assert_group_dead(int(marker.read_text()))
+    assert lab_project.records()[-1]["status"] == "keep"
 
 
 def test_review_belongs_to_recursive_mode(

@@ -68,14 +68,17 @@ gitignore build output (`target/`, `node_modules/`).
 
 Ask `/autoresearcher:new` for recursive mode and the agent also improves how it researches,
 following [Harness²](https://arxiv.org/abs/2610.14224). Its method lives in `lab/`: a short
-strategy it reads every iteration, skills it reads when their trigger fires, and a library of
+strategy it reads every iteration, skills it reads when their trigger fires, its own
+evaluations (`autoresearch probe`, which never commits or keeps anything), and a library of
 lessons. Every 10 runs it reviews that method against numbers the plugin computes. It judges
 its last changes run by run, keeps at most one lesson, has two subagents propose changes (how
 it researches, and what the problem is), and keeps only what the runs support.
 
 The harness that judges runs stays frozen and is the only thing that can keep a change.
 `lab/` is moved aside while it runs, every version of `lab/` is saved in
-`.autoresearch/lab-versions/`, and the report shows how each window of 10 runs went.
+`.autoresearch/lab-versions/`, and the report shows each window of 10 runs and every probe.
+Recursive mode needs evaluation data drawn fresh every run, so the agent's evaluations have no
+fixed answers to learn.
 
 ## Notes
 

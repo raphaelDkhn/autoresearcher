@@ -25,8 +25,8 @@ import subprocess
 import sys
 import time
 from collections import deque
-from collections.abc import Callable, Generator
-from dataclasses import dataclass
+from collections.abc import Callable, Generator, Mapping
+from dataclasses import dataclass, replace
 from datetime import datetime
 from importlib import resources
 from pathlib import Path, PurePosixPath
@@ -45,6 +45,7 @@ STATE = ".autoresearch"
 # Recursive mode: the agent's research harness, a Harness²-style tree of plain files.
 LAB = "lab"
 STRATEGY = "strategy.md"
+PROBE = "probe.sh"
 HIDDEN_LAB = "lab.hidden"
 LAB_VERSIONS = "lab-versions"
 LAB_SKIP = ("__pycache__", ".DS_Store")
@@ -117,6 +118,22 @@ class Record(_Record, total=False):
     """One line of runs.jsonl."""
 
     lab: str  # recursive mode: the version of lab/ that chose this run
+
+
+class Probe(TypedDict):
+    """One line of probes.jsonl: an evaluation the agent wrote, run without committing."""
+
+    id: str
+    time: str
+    branch: str
+    head: str
+    lab: str
+    runs: int  # runs on the branch before it, which places it in a window
+    status: str  # ok | crash | timeout
+    metrics: dict[str, float]
+    seconds: float
+    description: str
+    reason: str | None
 
 
 @dataclass(frozen=True)
@@ -474,37 +491,51 @@ def records_path(root: Path) -> Path:
     return root / STATE / "runs.jsonl"
 
 
-def read_records(root: Path) -> list[Record]:
-    path = records_path(root)
+def probes_path(root: Path) -> Path:
+    return root / STATE / "probes.jsonl"
+
+
+def read_jsonl(path: Path) -> list[Any]:
     if not path.exists():
         return []
-    records = []
+    rows = []
     for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
         if not line.strip():
             continue
         try:
-            records.append(json.loads(line))
+            rows.append(json.loads(line))
         except json.JSONDecodeError as exc:
             raise UsageError(f"{path} line {number} is not JSON ({exc}); fix or delete it") from exc
-    return records
+    return rows
+
+
+def read_records(root: Path) -> list[Record]:
+    return read_jsonl(records_path(root))
+
+
+def read_probes(root: Path) -> list[Probe]:
+    return read_jsonl(probes_path(root))
 
 
 def branch_records(root: Path, branch: str) -> list[Record]:
     return [record for record in read_records(root) if record["branch"] == branch]
 
 
-def append_record(root: Path, record: Record) -> None:
-    with records_path(root).open("a", encoding="utf-8") as handle:
-        handle.write(json.dumps(record) + "\n")
+def append_jsonl(path: Path, row: Mapping[str, object]) -> None:
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(row) + "\n")
         handle.flush()
         os.fsync(handle.fileno())
 
 
-def next_id(root: Path, records: list[Record]) -> str:
-    runs = root / STATE / "runs"
-    numbers = [int(record["id"]) for record in records]
-    if runs.exists():
-        numbers += [int(path.name) for path in runs.iterdir() if path.name.isdigit()]
+def append_record(root: Path, record: Record) -> None:
+    append_jsonl(records_path(root), record)
+
+
+def next_id(folder: Path, rows: list[Any]) -> str:
+    numbers = [int(row["id"]) for row in rows]
+    if folder.exists():
+        numbers += [int(path.name) for path in folder.iterdir() if path.name.isdigit()]
     return f"{max(numbers, default=0) + 1:04d}"
 
 
@@ -581,6 +612,9 @@ def recover(root: Path, fd: int, manifest: Manifest) -> None:
     state = read_lock(fd)
     settle(root, state)
     if not state:
+        return
+    if "probe" in state:  # a probe commits nothing, so there is nothing else to undo
+        write_lock(fd, {})
         return
     recorded = any(record["id"] == state["id"] for record in read_records(root))
     if not recorded:
@@ -815,25 +849,40 @@ def execute(
     on_spawn: Callable[[int], None],
 ) -> Outcome:
     """Run the command, and treat any change it makes to the records as tampering."""
-    path = records_path(root)
-    before = path.read_bytes() if path.exists() else None
+    paths = (records_path(root), probes_path(root))
+    before = [read_or_none(path) for path in paths]
     outcome = run_process(root, manifest, run_dir, signals, on_spawn)
-    after = path.read_bytes() if path.exists() else None
-    if after == before:
+    changed = []
+    for path, original in zip(paths, before):
+        if undo_change(path, original, run_dir):
+            changed.append(path.relative_to(root).as_posix())
+    if not changed:
         return outcome
-    if after is not None:
-        (run_dir / f"tampered-{path.name}").write_bytes(after)
-    if before is None:
-        path.unlink()
-    else:
-        path.write_bytes(before)
     reason = (
-        f"the run changed {path.relative_to(root)}, which only autoresearch writes; it was "
+        f"the run changed {', '.join(changed)}, which only autoresearch writes; it was "
         f"restored and the changed copy saved in {run_dir.relative_to(root)}/"
     )
     request_stop(root, reason)
     print(f"autoresearch: STOP REQUESTED: {reason}", file=sys.stderr)
     return Outcome("crash", outcome.seconds, reason)
+
+
+def read_or_none(path: Path) -> bytes | None:
+    return path.read_bytes() if path.exists() else None
+
+
+def undo_change(path: Path, original: bytes | None, run_dir: Path) -> bool:
+    """Put back a record file the run changed, keeping the changed version as evidence."""
+    current = read_or_none(path)
+    if current == original:
+        return False
+    if current is not None:
+        (run_dir / f"tampered-{path.name}").write_bytes(current)
+    if original is None:
+        path.unlink()
+    else:
+        path.write_bytes(original)
+    return True
 
 
 def run_process(
@@ -1042,32 +1091,35 @@ def format_verdict(record: Record, metric: str, best_before: float | None) -> st
 
 def verdict_details(root: Path, trial: Trial, record: Record) -> list[str]:
     lines = []
-    relative = trial.run_dir.relative_to(root)
     if record["status"] != "keep" and trial.commit:
         files = " ".join(shlex.quote(p) for p in changed_files(root, trial.parent, trial.commit))
         lines.append(f"  restore with: git restore --source={trial.commit[:7]} -- {files}")
-    if (trial.run_dir / "stray").exists():
+    return lines + output_lines(root, trial.run_dir, record["status"] in ("crash", "timeout"))
+
+
+def output_lines(root: Path, run_dir: Path, failed: bool) -> list[str]:
+    """Where a run's or a probe's outputs went, and the end of its log when it failed."""
+    lines = []
+    relative = run_dir.relative_to(root)
+    if (run_dir / "stray").exists():
         lines.append(f"  files the run wrote into the repo were moved to {relative}/stray/")
     artifacts = sorted(
-        p.name for p in trial.run_dir.iterdir() if p.name not in ("run.log", "stray", NOTES)
+        p.name for p in run_dir.iterdir() if p.name not in ("run.log", "stray", NOTES)
     )
     if artifacts:
         more = ", ..." if len(artifacts) > SHOWN_ARTIFACTS else ""
         shown = ", ".join(artifacts[:SHOWN_ARTIFACTS])
         lines.append(f"  artifacts in {relative}/: {shown}{more}")
-    if record["status"] in ("crash", "timeout"):
+    if failed:
         lines.append(f"  last lines of {relative}/run.log:")
-        lines.append(log_tail(trial.run_dir / "run.log"))
+        lines.append(log_tail(run_dir / "run.log"))
     return lines
 
 
 def after_run(root: Path, manifest: Manifest, branch: str) -> None:
     """Refresh the report, ask for a due review, and request a stop when recent runs all failed."""
     mine = branch_records(root, branch)
-    try:
-        refresh_report(root, manifest, branch, mine)
-    except OSError as exc:
-        print(f"autoresearch: warning: could not write the report: {exc}", file=sys.stderr)
+    refresh_report(root, manifest, branch, mine)
     if review_due(root, mine):
         print(review_line())
     recent = mine[-FAILURE_LIMIT:]
@@ -1081,9 +1133,12 @@ def after_run(root: Path, manifest: Manifest, branch: str) -> None:
         print(f"autoresearch: STOP REQUESTED: {reason}", file=sys.stderr)
 
 
-def refresh_report(root: Path, manifest: Manifest, branch: str, records: list[Record]) -> Path:
+def refresh_report(root: Path, manifest: Manifest, branch: str, records: list[Record]) -> None:
     title = f"{root.name} · {branch}"
-    return report.write_report(root / STATE, title, manifest.metric, manifest.goal, records)
+    try:
+        report.write_report(root / STATE, title, manifest.metric, manifest.goal, records)
+    except (OSError, ValueError) as exc:  # ValueError: a probes.jsonl line that is not JSON
+        print(f"autoresearch: warning: could not write the report: {exc}", file=sys.stderr)
 
 
 def cmd_run(args: argparse.Namespace) -> int:
@@ -1102,7 +1157,8 @@ def cmd_run(args: argparse.Namespace) -> int:
             check_drift(root, kept[-1]["commit"])
         if signals.received:
             return 130
-        trial = start_trial(root, branch, next_id(root, records), description, baseline=not kept)
+        trial_id = next_id(root / STATE / "runs", records)
+        trial = start_trial(root, branch, trial_id, description, baseline=not kept)
         write_lock(fd, trial.lock_state())
         outcome = referee(
             root,
@@ -1119,6 +1175,89 @@ def cmd_run(args: argparse.Namespace) -> int:
         for line in verdict_details(root, trial, record):
             print(line)
         after_run(root, manifest, branch)
+    return 130 if signals.received else 0
+
+
+# probe --------------------------------------------------------------------------------
+
+
+def probe_script(root: Path) -> Path:
+    if not (root / LAB).is_dir():
+        raise UsageError(
+            f"probe belongs to recursive mode, which keeps its research harness in {LAB}/ "
+            "(autoresearch init --recursive)"
+        )
+    script = root / LAB / PROBE
+    if not script.is_file():
+        raise UsageError(
+            f"write {LAB}/{PROBE} first: the evaluation to run (see {LAB}/skills/new-evaluation.md)"
+        )
+    return script
+
+
+def probe_status(outcome: Outcome, wrote: list[str]) -> tuple[str, str | None]:
+    if outcome.status == "ok" and wrote:
+        return "crash", (
+            f"the probe wrote files into the repo ({summarize(wrote)}); write outputs to "
+            "$AUTORESEARCH_RUN_DIR"
+        )
+    return outcome.status, outcome.reason
+
+
+def probe_line(probe: Probe) -> str:
+    shown = " ".join(f"{key}={format_number(value)}" for key, value in probe["metrics"].items())
+    reason = f"  [{probe['reason']}]" if probe["reason"] else ""
+    return (
+        f"probe #{probe['id']} {probe['status']:<8} {shown or 'no metrics'}  "
+        f"{probe['seconds']:g}s  {probe['description']}{reason}"
+    )
+
+
+def cmd_probe(args: argparse.Namespace) -> int:
+    description = " ".join(args.message.split())
+    if not description:
+        raise UsageError("describe the probe: autoresearch probe -m '<what it checks>'")
+    root = find_root(Path.cwd())
+    manifest = load_manifest(root)
+    script = probe_script(root)
+    with project_lock(root) as fd, Signals() as signals:
+        recover(root, fd, manifest)
+        branch = preflight(root)
+        guard(root, manifest)
+        lab = lab_version(root) or ""
+        folder = root / STATE / "probes"
+        probe_id = next_id(folder, read_probes(root))
+        run_dir = folder / probe_id
+        run_dir.mkdir(parents=True)
+        command = shlex.join(["/bin/sh", script.relative_to(root).as_posix(), *args.args])
+        write_lock(fd, {"probe": probe_id})
+        outcome = execute(
+            root,
+            replace(manifest, command=command),
+            run_dir,
+            signals,
+            lambda pid: write_lock(fd, {"probe": probe_id, "pgid": pid}),
+        )
+        status, reason = probe_status(outcome, quarantine(root, run_dir, spare=manifest.editable))
+        probe = Probe(
+            id=probe_id,
+            time=now(),
+            branch=branch,
+            head=head(root),
+            lab=lab,
+            runs=len(branch_records(root, branch)),
+            status=status,
+            metrics=parse_log(run_dir / "run.log", manifest.metric).metrics,
+            seconds=round(outcome.seconds, 1),
+            description=description,
+            reason=reason,
+        )
+        append_jsonl(probes_path(root), probe)
+        write_lock(fd, {})
+        print(probe_line(probe))
+        for line in output_lines(root, run_dir, status != "ok"):
+            print(line)
+        refresh_report(root, manifest, branch, branch_records(root, branch))
     return 130 if signals.received else 0
 
 
@@ -1207,25 +1346,35 @@ def cmd_status(args: argparse.Namespace) -> int:
 
 
 def window_line(window: report.Window) -> str:
-    per_hour = window.gain / (window.seconds / 3600) if window.seconds else 0.0
+    hours = (window.seconds + window.probe_seconds) / 3600
+    per_hour = f"{window.gain / hours:+.2%}" if hours else "-"
     labs = ", ".join(window.labs) or "-"
     return (
         f"  #{window.first}-#{window.last}  kept {window.kept}/{window.runs}  failed "
-        f"{window.failed}  gain {window.gain:+.2%}  {per_hour:+.2%} per compute-hour  lab {labs}"
+        f"{window.failed}  probes {window.probes}  gain {window.gain:+.2%}  {per_hour} per "
+        f"compute-hour  lab {labs}"
     )
 
 
-def evidence_text(manifest: Manifest, branch: str, records: list[Record]) -> str:
+def evidence_text(
+    manifest: Manifest, branch: str, records: list[Record], probes: list[Probe]
+) -> str:
     size = report.WINDOW_RUNS
-    last = records[(len(records) - 1) // size * size :] if records else []
+    start = (len(records) - 1) // size * size if records else 0
     lines = [
         "# Evidence",
         "",
         status_text(manifest, branch, records, 0),
         f"Windows of {size} runs (gain: how much the best improved over the window):",
-        *(window_line(window) for window in report.windows(records, manifest.goal, size)),
+        *(window_line(window) for window in report.windows(records, probes, manifest.goal, size)),
         "Runs in the last window:",
-        *(f"{run_line(record)}  lab {record.get('lab', '-')}" for record in last),
+        *(f"{run_line(record)}  lab {record.get('lab', '-')}" for record in records[start:]),
+        "Probes since it began:",
+        *(
+            f"  {probe_line(probe)}  lab {probe['lab']}"
+            for probe in probes
+            if probe["runs"] >= start
+        ),
         f"Each lab version is saved in {STATE}/{LAB_VERSIONS}/<version>/, and the notes.md each "
         f"run was chosen with in {STATE}/runs/<id>/.",
     ]
@@ -1242,7 +1391,8 @@ def cmd_review(_args: argparse.Namespace) -> int:
         )
     branch = current_branch(root) or "HEAD"
     print(resources.files("autoresearcher").joinpath("review.md").read_text(encoding="utf-8"))
-    print(evidence_text(manifest, branch, branch_records(root, branch)))
+    probes = [probe for probe in read_probes(root) if probe["branch"] == branch]
+    print(evidence_text(manifest, branch, branch_records(root, branch), probes))
     return 0
 
 
@@ -1306,7 +1456,7 @@ def loop_permissions(editable: tuple[str, ...], recursive: bool) -> list[str]:
     ]
     rules += [f"Edit(/{path})" for path in (*editable, NOTES, f"{STATE}/stop")]
     if recursive:
-        rules += [f"Edit(/{LAB}/**)", "Bash(autoresearch review)"]
+        rules += [f"Edit(/{LAB}/**)", "Bash(autoresearch review)", "Bash(autoresearch probe *)"]
     return rules
 
 
@@ -1417,6 +1567,13 @@ def build_parser() -> argparse.ArgumentParser:
     status = sub.add_parser("status", help="summarize the runs on the current branch")
     status.add_argument("-n", type=int, default=15, help="how many recent runs to list")
     status.set_defaults(func=cmd_status)
+
+    probe = sub.add_parser(
+        "probe", help="recursive mode: run lab/probe.sh, your own evaluation, without committing"
+    )
+    probe.add_argument("-m", "--message", required=True, help="what this probe checks")
+    probe.add_argument("args", nargs=argparse.REMAINDER, help="arguments passed to lab/probe.sh")
+    probe.set_defaults(func=cmd_probe)
 
     review = sub.add_parser(
         "review", help="recursive mode: print the review procedure and the evidence for it"

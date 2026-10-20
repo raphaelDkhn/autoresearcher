@@ -29,3 +29,5 @@ short: procedures with a clear trigger go in `lab/skills/`, named here.
 ## Skills
 
 - After 5 discards in a row, or when the backlog is empty, read `lab/skills/when-stuck.md`.
+- Before spending a run on an idea you are unsure of, or when runs are too slow or too noisy
+  to tell ideas apart, read `lab/skills/new-evaluation.md`.

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import math
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
@@ -11,7 +12,7 @@ from typing import TYPE_CHECKING
 from urllib.parse import quote
 
 if TYPE_CHECKING:
-    from autoresearcher.cli import Record
+    from autoresearcher.cli import Probe, Record
 
 IMAGE_SUFFIXES = (".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg")
 REFRESH_SECONDS = 30
@@ -136,10 +137,13 @@ def render(state_dir: Path, title: str, metric: str, goal: str, records: list[Re
         '<a class="skip" href="#runs">Skip to the runs table</a>',
     ]
     if records:
+        branch = records[-1]["branch"]
+        probes = [probe for probe in read_probes(state_dir) if probe["branch"] == branch]
         body += [
             stats(metric, records),
             chart_card(metric, records),
-            harness_card(records, goal),
+            harness_card(records, probes, goal),
+            probes_card(probes),
             table(state_dir, metric, records),
         ]
     else:
@@ -355,6 +359,8 @@ def point(
 
 # Recursive mode -----------------------------------------------------------------------
 
+SHOWN_PROBES = 20
+
 
 @dataclass(frozen=True)
 class Window:
@@ -367,26 +373,33 @@ class Window:
     failed: int
     gain: float  # how much the best improved over the window, as a fraction of where it began
     seconds: float
+    probes: int  # the agent's own evaluations, run while it chose this window's runs
+    probe_seconds: float
     labs: tuple[str, ...]  # versions of lab/ that chose the runs, in order
 
 
-def windows(records: Sequence[Record], goal: str, size: int) -> list[Window]:
+def read_probes(state_dir: Path) -> list[Probe]:
+    path = state_dir / "probes.jsonl"
+    if not path.exists():
+        return []
+    lines = path.read_text(encoding="utf-8").splitlines()
+    return [json.loads(line) for line in lines if line.strip()]
+
+
+def windows(
+    records: Sequence[Record], probes: Sequence[Probe], goal: str, size: int
+) -> list[Window]:
     result = []
     best: float | None = None
-    for start in range(0, len(records), size):
+    for index, start in enumerate(range(0, len(records), size)):
         chunk = records[start : start + size]
         began = best
-        labs: dict[str, None] = {}
         for record in chunk:
             value = record["metric"]
             if record["status"] == "keep" and value is not None:
                 began = value if began is None else began  # the baseline starts the first window
                 best = value
-            if "lab" in record:
-                labs[record["lab"]] = None
-        gain = 0.0
-        if began and best is not None:  # a best of zero has no relative improvement
-            gain = (began - best if goal == "minimize" else best - began) / abs(began)
+        mine = [probe for probe in probes if probe["runs"] // size == index]
         result.append(
             Window(
                 first=chunk[0]["id"],
@@ -394,20 +407,29 @@ def windows(records: Sequence[Record], goal: str, size: int) -> list[Window]:
                 runs=len(chunk),
                 kept=sum(r["status"] == "keep" for r in chunk),
                 failed=sum(r["status"] in ("crash", "timeout") for r in chunk),
-                gain=gain,
+                gain=relative_gain(began, best, goal),
                 seconds=sum(r["seconds"] for r in chunk),
-                labs=tuple(labs),
+                probes=len(mine),
+                probe_seconds=sum(probe["seconds"] for probe in mine),
+                labs=tuple(dict.fromkeys(r["lab"] for r in chunk if "lab" in r)),
             )
         )
     return result
 
 
-def harness_card(records: list[Record], goal: str) -> str:
+def relative_gain(began: float | None, best: float | None, goal: str) -> float:
+    if not began or best is None:  # no baseline yet, or a zero to measure from
+        return 0.0
+    return (began - best if goal == "minimize" else best - began) / abs(began)
+
+
+def harness_card(records: list[Record], probes: list[Probe], goal: str) -> str:
     if not any("lab" in record for record in records):
         return ""
     rows = []
-    for window in windows(records, goal, WINDOW_RUNS):
-        per_hour = f"{window.gain / (window.seconds / 3600):+.2%}" if window.seconds else ""
+    for window in windows(records, probes, goal, WINDOW_RUNS):
+        hours = (window.seconds + window.probe_seconds) / 3600
+        per_hour = f"{window.gain / hours:+.2%}" if hours else ""
         labs = " ".join(
             f'<a href="lab-versions/{quote(lab)}/strategy.md"><code>{escape(lab[:7])}</code></a>'
             for lab in window.labs
@@ -415,15 +437,42 @@ def harness_card(records: list[Record], goal: str) -> str:
         rows.append(
             f"<tr><td>#{escape(window.first)} to #{escape(window.last)}</td>"
             f'<td class="num">{window.kept}/{window.runs}</td>'
-            f'<td class="num">{window.failed}</td><td class="num">{window.gain:+.2%}</td>'
-            f'<td class="num">{per_hour}</td><td>{labs}</td></tr>'
+            f'<td class="num">{window.failed}</td><td class="num">{window.probes}</td>'
+            f'<td class="num">{window.gain:+.2%}</td><td class="num">{per_hour}</td>'
+            f"<td>{labs}</td></tr>"
         )
     return (
         '<div class="card"><h2>Research harness</h2><div class="table-wrap"><table>'
         '<caption class="skip">Each window of runs and the research harness behind it</caption>'
         '<thead><tr><th>Runs</th><th class="num">Kept</th><th class="num">Failed</th>'
-        '<th class="num">Gain</th><th class="num">Gain per compute-hour</th>'
-        f"<th>Lab versions</th></tr></thead><tbody>{''.join(rows)}</tbody></table></div></div>"
+        '<th class="num">Probes</th><th class="num">Gain</th>'
+        '<th class="num">Gain per compute-hour</th><th>Lab versions</th></tr></thead>'
+        f"<tbody>{''.join(rows)}</tbody></table></div></div>"
+    )
+
+
+def probes_card(probes: list[Probe]) -> str:
+    if not probes:
+        return ""
+    rows = []
+    for probe in reversed(probes[-SHOWN_PROBES:]):
+        results = " ".join(f"{key}={fmt(value)}" for key, value in probe["metrics"].items())
+        reason = f'<span class="reason">{escape(probe["reason"])}</span>' if probe["reason"] else ""
+        log = f"probes/{quote(probe['id'])}/run.log"
+        rows.append(
+            f"<tr><td>#{escape(probe['id'])}</td><td>{escape(probe['status'])}</td>"
+            f"<td><code>{escape(results)}</code></td>"
+            f'<td class="num">{probe["seconds"]:g}</td>'
+            f"<td>{escape(probe['description'])}{reason}</td>"
+            f"<td><code>{escape(probe['lab'][:7])}</code></td>"
+            f'<td><a href="{escape(log)}">log</a></td></tr>'
+        )
+    return (
+        '<div class="card"><h2>Probes</h2><div class="table-wrap"><table>'
+        '<caption class="skip">The agent\'s own evaluations, newest first</caption>'
+        '<thead><tr><th>Probe</th><th>Status</th><th>Results</th><th class="num">Seconds</th>'
+        "<th>What it checked</th><th>Lab</th><th>Log</th></tr></thead>"
+        f"<tbody>{''.join(rows)}</tbody></table></div></div>"
     )
 
 

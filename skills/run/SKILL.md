@@ -11,6 +11,7 @@ allowed-tools:
   - Bash(autoresearch check)
   - Bash(autoresearch status *)
   - Bash(autoresearch review)
+  - Bash(autoresearch probe *)
   - Bash(git status)
   - Bash(git status *)
   - Bash(git diff *)
