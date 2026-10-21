@@ -16,7 +16,7 @@ if TYPE_CHECKING:
 
 IMAGE_SUFFIXES = (".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg")
 REFRESH_SECONDS = 30
-WINDOW_RUNS = 10  # recursive mode reviews its research harness after each window of runs
+WINDOW_RUNS = 10  # the agent reviews its research harness after each window of runs
 # Chart geometry in viewBox units; the SVG scales to its card, about 1:1 on a wide window.
 WIDTH, HEIGHT = 1100, 300
 LEFT, RIGHT, TOP, BOTTOM = 56, 16, 16, 48
@@ -405,7 +405,7 @@ def point(
     )
 
 
-# Recursive mode -----------------------------------------------------------------------
+# Research harness ---------------------------------------------------------------------
 
 SHOWN_PROBES = 20
 
@@ -459,7 +459,7 @@ def windows(
                 seconds=sum(r["seconds"] for r in chunk),
                 probes=len(mine),
                 probe_seconds=sum(probe["seconds"] for probe in mine),
-                labs=tuple(dict.fromkeys(r["lab"] for r in chunk if "lab" in r)),
+                labs=tuple(dict.fromkeys(r["lab"] for r in chunk)),
             )
         )
     return result
@@ -472,8 +472,6 @@ def relative_gain(began: float | None, best: float | None, goal: str) -> float:
 
 
 def harness_card(records: list[Record], probes: list[Probe], goal: str) -> str:
-    if not any("lab" in record for record in records):
-        return ""
     rows = []
     for window in windows(records, probes, goal, WINDOW_RUNS):
         hours = (window.seconds + window.probe_seconds) / 3600

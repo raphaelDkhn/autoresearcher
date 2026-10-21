@@ -10,9 +10,9 @@ from infinit_research.cli import Probe, Record
 
 
 def record(
-    run_id: str, status: str, metric: float | None, description: str = "idea", lab: str = ""
+    run_id: str, status: str, metric: float | None, description: str = "idea", lab: str = "aaa"
 ) -> Record:
-    result = Record(
+    return Record(
         id=run_id,
         time="2026-10-19T12:00:00+02:00",
         branch="infinit-research/oct19",
@@ -23,10 +23,8 @@ def record(
         seconds=1.5,
         description=description,
         reason="exit code 1" if status == "crash" else None,
+        lab=lab,
     )
-    if lab:
-        result["lab"] = lab
-    return result
 
 
 RUNS = [
@@ -39,7 +37,7 @@ RUNS = [
 
 def test_report_has_a_row_and_a_point_per_run(tmp_path: Path) -> None:
     html = report.write_report(tmp_path, "proj · main", "loss", "minimize", RUNS).read_text()
-    assert html.count("<tr><td>") == 4
+    assert html.split('<table id="runs">')[1].count("<tr><td>") == 4
     assert html.count('class="pt"') == 4
     assert "Change vs baseline" in html and "-55.56%" in html
     assert "exit code 1" in html
@@ -119,9 +117,9 @@ def test_windows_measure_gain_in_the_goal_direction() -> None:
     assert report.windows(from_zero, [], "maximize", 10)[0].gain == 0
 
 
-def test_report_shows_the_research_harness_only_in_recursive_mode(tmp_path: Path) -> None:
-    plain = report.write_report(tmp_path, "proj", "loss", "minimize", RUNS).read_text()
-    assert "Research harness" not in plain and "Probes" not in plain
+def test_report_shows_the_research_harness_and_any_probes(tmp_path: Path) -> None:
+    without_probes = report.write_report(tmp_path, "proj", "loss", "minimize", RUNS).read_text()
+    assert "Research harness" in without_probes and "<h2>Probes</h2>" not in without_probes
     runs = [
         record("0001", "keep", 9.0, lab="3fa2c1d4e5f6"),
         record("0002", "keep", 4.0, lab="3fa2c1d4e5f6"),

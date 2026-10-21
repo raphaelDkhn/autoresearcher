@@ -42,7 +42,7 @@ MANIFEST = "infinit-research.toml"
 PROGRAM = "program.md"
 NOTES = "notes.md"
 STATE = ".infinit-research"
-# Recursive mode: the agent's research harness, a Harness²-style tree of plain files.
+# The agent's research harness, a Harness²-style tree of plain files.
 LAB = "lab"
 STRATEGY = "strategy.md"
 PROBE = "probe.sh"
@@ -66,6 +66,7 @@ IGNORES = (
     ".DS_Store",
     ".venv/",
     ".claude/settings.local.json",
+    f"{LAB}/",
 )
 METRIC_NAME = re.compile(r"[A-Za-z_][\w.\-/]*")
 METRIC_LINE = re.compile(r"([A-Za-z_][\w.\-/]*):[ \t]+(\S+)[ \t]*")
@@ -101,7 +102,9 @@ class Interrupted(BaseException):
     """Raised by the signal handler while an experiment is running."""
 
 
-class _Record(TypedDict):
+class Record(TypedDict):
+    """One line of runs.jsonl."""
+
     id: str
     time: str
     branch: str
@@ -112,12 +115,7 @@ class _Record(TypedDict):
     seconds: float
     description: str
     reason: str | None
-
-
-class Record(_Record, total=False):
-    """One line of runs.jsonl."""
-
-    lab: str  # recursive mode: the version of lab/ that chose this run
+    lab: str  # the version of lab/ that chose this run
 
 
 class Probe(TypedDict):
@@ -176,7 +174,7 @@ class Trial:
     parent: str
     commit: str | None  # None when a baseline ran on HEAD without a new commit
     run_dir: Path
-    lab: str | None  # None in auto mode
+    lab: str
 
     @property
     def sha(self) -> str:
@@ -598,7 +596,7 @@ def write_lock(fd: int, state: dict[str, Any]) -> None:
 
 
 def settle(root: Path, state: dict[str, Any]) -> None:
-    """Stop what a killed controller left running, then put back the lab/ it had hidden."""
+    """Stop what a killed controller left running, then make sure lab/ is in place."""
     if isinstance(state.get("pgid"), int):
         # shortcut: a dead group's id could in theory be reused by now; compare process start
         # times if that ever matters.
@@ -637,7 +635,7 @@ def recover(root: Path, fd: int, manifest: Manifest) -> None:
 
 
 def interrupted_record(state: dict[str, Any]) -> Record:
-    record = Record(
+    return Record(
         id=state["id"],
         time=now(),
         branch=state["branch"],
@@ -648,20 +646,16 @@ def interrupted_record(state: dict[str, Any]) -> Record:
         seconds=round(time.time() - state.get("started", time.time()), 1),
         description=state["description"],
         reason="interrupted: the controller was killed during the run",
+        lab=state["lab"],
     )
-    if state.get("lab"):
-        record["lab"] = state["lab"]
-    return record
 
 
-# Recursive mode: the research harness in lab/ --------------------------------------------
+# The research harness in lab/ ---------------------------------------------------------
 
 
-def lab_files(root: Path) -> dict[str, bytes] | None:
-    """Read every file in lab/, or return None in auto mode, where there is no lab/."""
+def lab_files(root: Path) -> dict[str, bytes]:
+    """Read every file in lab/; none while a run has it hidden."""
     lab = root / LAB
-    if not lab.is_dir():
-        return None
     paths = [
         path
         for path in sorted(lab.rglob("*"))
@@ -717,11 +711,9 @@ def lab_hash(files: dict[str, bytes]) -> str:
     return digest.hexdigest()[:12]
 
 
-def lab_version(root: Path) -> str | None:
-    """Validate lab/, save a copy of each new version, and return its hash; None in auto mode."""
+def lab_version(root: Path) -> str:
+    """Validate lab/, save a copy of each new version, and return its hash."""
     files = lab_files(root)
-    if files is None:
-        return None
     check_lab(files)
     version = lab_hash(files)
     saved = root / STATE / LAB_VERSIONS / version
@@ -744,8 +736,6 @@ def referee(
 ) -> Outcome:
     """Run the harness with lab/ moved aside, so the solution can neither use nor change it."""
     lab, hidden = root / LAB, root / STATE / HIDDEN_LAB
-    if not lab.is_dir():
-        return execute(root, manifest, run_dir, signals, on_spawn)
     lab.rename(hidden)
     try:
         outcome = execute(root, manifest, run_dir, signals, on_spawn)
@@ -765,11 +755,17 @@ def referee(
 
 
 def restore_lab(root: Path) -> None:
-    """Put back a lab/ that a killed controller left hidden."""
-    hidden = root / STATE / HIDDEN_LAB
+    """Put back a lab/ that a killed controller left hidden, or seed one a fresh clone lacks."""
+    hidden, lab = root / STATE / HIDDEN_LAB, root / LAB
     if not hidden.exists():
+        if not lab.exists():
+            copy_seed(resources.files("infinit_research").joinpath(LAB), lab)
+            print(
+                f"infinit-research: seeded {LAB}/, which was missing (it is gitignored, so a "
+                "fresh clone lacks it)",
+                file=sys.stderr,
+            )
         return
-    lab = root / LAB
     if not lab.exists():
         hidden.rename(lab)
         return
@@ -786,8 +782,7 @@ def review_due(root: Path, records: list[Record]) -> bool:
     """A window of runs just ended and lab/ has not changed since its last run."""
     if not records or len(records) % report.WINDOW_RUNS:
         return False
-    files = lab_files(root)
-    return files is not None and records[-1].get("lab") == lab_hash(files)
+    return records[-1]["lab"] == lab_hash(lab_files(root))
 
 
 def review_line() -> str:
@@ -1013,7 +1008,7 @@ def start_trial(root: Path, branch: str, trial_id: str, description: str, baseli
     lab = lab_version(root)
     run_dir = root / STATE / "runs" / trial_id
     run_dir.mkdir(parents=True)
-    if lab is not None and (root / NOTES).exists():
+    if (root / NOTES).exists():
         shutil.copyfile(root / NOTES, run_dir / NOTES)  # what the agent believed when it chose
     parent = head(root)
     created = commit_all(root, description)
@@ -1041,9 +1036,8 @@ def finish_trial(
         seconds=round(outcome.seconds, 1),
         description=trial.description,
         reason=reason,
+        lab=trial.lab,
     )
-    if trial.lab:
-        record["lab"] = trial.lab
     append_record(root, record)
     if verdict != "keep" and trial.commit:
         revert(root, trial)
@@ -1185,11 +1179,6 @@ def cmd_run(args: argparse.Namespace) -> int:
 
 
 def probe_script(root: Path) -> Path:
-    if not (root / LAB).is_dir():
-        raise UsageError(
-            f"probe belongs to recursive mode, which keeps its research harness in {LAB}/ "
-            "(infinit-research init --recursive)"
-        )
     script = root / LAB / PROBE
     if not script.is_file():
         raise UsageError(
@@ -1222,12 +1211,12 @@ def cmd_probe(args: argparse.Namespace) -> int:
         raise UsageError("describe the probe: infinit-research probe -m '<what it checks>'")
     root = find_root(Path.cwd())
     manifest = load_manifest(root)
-    script = probe_script(root)
     with project_lock(root) as fd, Signals() as signals:
         recover(root, fd, manifest)
         branch = preflight(root)
         guard(root, manifest)
-        lab = lab_version(root) or ""
+        script = probe_script(root)
+        lab = lab_version(root)
         folder = root / STATE / "probes"
         probe_id = next_id(folder, read_probes(root))
         run_dir = folder / probe_id
@@ -1371,7 +1360,7 @@ def evidence_text(
         f"Windows of {size} runs (gain: how much the best improved over the window):",
         *(window_line(window) for window in report.windows(records, probes, manifest.goal, size)),
         "Runs in the last window:",
-        *(f"{run_line(record)}  lab {record.get('lab', '-')}" for record in records[start:]),
+        *(f"{run_line(record)}  lab {record['lab']}" for record in records[start:]),
         "Probes since it began:",
         *(
             f"  {probe_line(probe)}  lab {probe['lab']}"
@@ -1387,11 +1376,6 @@ def evidence_text(
 def cmd_review(_args: argparse.Namespace) -> int:
     root = find_root(Path.cwd())
     manifest = load_manifest(root)
-    if not (root / LAB).is_dir():
-        raise UsageError(
-            f"review belongs to recursive mode, which keeps its research harness in {LAB}/ "
-            "(infinit-research init --recursive)"
-        )
     branch = current_branch(root) or "HEAD"
     print(resources.files("infinit_research").joinpath("review.md").read_text(encoding="utf-8"))
     probes = [probe for probe in read_probes(root) if probe["branch"] == branch]
@@ -1423,11 +1407,8 @@ def render_manifest(
     )
 
 
-def render_program(manifest: Manifest, recursive: bool) -> str:
-    package = resources.files("infinit_research")
-    template = package.joinpath(PROGRAM).read_text(encoding="utf-8")
-    if recursive:
-        template += "\n" + package.joinpath("recursive.md").read_text(encoding="utf-8")
+def render_program(manifest: Manifest) -> str:
+    template = resources.files("infinit_research").joinpath(PROGRAM).read_text(encoding="utf-8")
     values = {
         "metric": manifest.metric,
         "goal_word": "low" if manifest.goal == "minimize" else "high",
@@ -1444,11 +1425,13 @@ def bash_timeout_env(timeout: float) -> dict[str, str]:
     return {"BASH_DEFAULT_TIMEOUT_MS": milliseconds, "BASH_MAX_TIMEOUT_MS": milliseconds}
 
 
-def loop_permissions(editable: tuple[str, ...], recursive: bool) -> list[str]:
+def loop_permissions(editable: tuple[str, ...]) -> list[str]:
     rules = [
         "Bash(infinit-research run *)",
         "Bash(infinit-research status)",
         "Bash(infinit-research status *)",
+        "Bash(infinit-research review)",
+        "Bash(infinit-research probe *)",
         "Bash(git status)",
         "Bash(git status *)",
         "Bash(git diff)",
@@ -1458,17 +1441,10 @@ def loop_permissions(editable: tuple[str, ...], recursive: bool) -> list[str]:
         "Bash(git restore *)",
         f"Bash(rm -f {STATE}/stop)",
     ]
-    rules += [f"Edit(/{path})" for path in (*editable, NOTES, f"{STATE}/stop")]
-    if recursive:
-        rules += [
-            f"Edit(/{LAB}/**)",
-            "Bash(infinit-research review)",
-            "Bash(infinit-research probe *)",
-        ]
-    return rules
+    return rules + [f"Edit(/{path})" for path in (*editable, NOTES, f"{LAB}/**", f"{STATE}/stop")]
 
 
-def write_claude_settings(root: Path, manifest: Manifest, recursive: bool) -> None:
+def write_claude_settings(root: Path, manifest: Manifest) -> None:
     """Merge the loop's permissions and Bash timeout into .claude/settings.json."""
     path = root / ".claude" / "settings.json"
     try:
@@ -1478,7 +1454,7 @@ def write_claude_settings(root: Path, manifest: Manifest, recursive: bool) -> No
     allow = settings.setdefault("permissions", {}).setdefault("allow", [])
     if not isinstance(allow, list):
         raise UsageError(f"{path}: permissions.allow must be a list")
-    allow += [rule for rule in loop_permissions(manifest.editable, recursive) if rule not in allow]
+    allow += [rule for rule in loop_permissions(manifest.editable) if rule not in allow]
     env = settings.setdefault("env", {})
     for key, value in bash_timeout_env(manifest.timeout).items():
         current = str(env.get(key, ""))
@@ -1488,22 +1464,22 @@ def write_claude_settings(root: Path, manifest: Manifest, recursive: bool) -> No
     path.write_text(json.dumps(settings, indent=2) + "\n", encoding="utf-8")
 
 
-def update_gitignore(root: Path, ignores: tuple[str, ...]) -> None:
+def update_gitignore(root: Path) -> None:
     path = root / ".gitignore"
     text = path.read_text(encoding="utf-8") if path.exists() else ""
-    missing = [line for line in ignores if line not in text.splitlines()]
+    missing = [line for line in IGNORES if line not in text.splitlines()]
     if missing:
         prefix = "" if not text or text.endswith("\n") else "\n"
         addition = prefix + "# infinit-research\n" + "\n".join(missing) + "\n"
         path.write_text(text + addition, encoding="utf-8")
 
 
-def refuse_existing(root: Path, recursive: bool) -> None:
+def refuse_existing(root: Path) -> None:
     hints = {
         PROGRAM: " (move it aside with `git mv program.md program.orig.md`, then merge it)",
-        LAB: " (recursive mode keeps its research harness there; rename yours first)",
+        LAB: " (the agent keeps its research harness there; rename yours first)",
     }
-    for name in (MANIFEST, PROGRAM, LAB) if recursive else (MANIFEST, PROGRAM):
+    for name in (MANIFEST, PROGRAM, LAB):
         if (root / name).exists():
             raise UsageError(f"{name} already exists{hints.get(name, '')}")
 
@@ -1521,7 +1497,7 @@ def copy_seed(source: Traversable, target: Path) -> None:
 
 def cmd_init(args: argparse.Namespace) -> int:
     root = Path.cwd()
-    refuse_existing(root, args.recursive)
+    refuse_existing(root)
     top = toplevel(root)
     if top is not None and top != root.resolve():
         raise UsageError(f"an infinit research project must be a git repository root; {top} is")
@@ -1530,15 +1506,13 @@ def cmd_init(args: argparse.Namespace) -> int:
     if top is None:
         git(root, "init", "-q", "-b", "main")
     (root / MANIFEST).write_text(text, encoding="utf-8")
-    (root / PROGRAM).write_text(render_program(manifest, args.recursive), encoding="utf-8")
+    (root / PROGRAM).write_text(render_program(manifest), encoding="utf-8")
     if not (root / NOTES).exists():
         (root / NOTES).write_text(NOTES_SEED, encoding="utf-8")
-    if args.recursive:
-        copy_seed(resources.files("infinit_research").joinpath(LAB), root / LAB)
-    update_gitignore(root, (*IGNORES, f"{LAB}/") if args.recursive else IGNORES)
-    write_claude_settings(root, manifest, args.recursive)
-    mode = "a recursive-mode" if args.recursive else "an"
-    print(f"initialized {mode} infinit research project in {root}")
+    copy_seed(resources.files("infinit_research").joinpath(LAB), root / LAB)
+    update_gitignore(root)
+    write_claude_settings(root, manifest)
+    print(f"initialized an infinit research project in {root}")
     print(
         "next: fill in the research brief in program.md, run `infinit-research check`, then commit"
     )
@@ -1562,11 +1536,6 @@ def build_parser() -> argparse.ArgumentParser:
     init.add_argument("--run", dest="run_command", required=True, help="one experiment's command")
     init.add_argument("--editable", required=True, nargs="+", help="globs the agent may change")
     init.add_argument("--timeout", type=float, default=480.0, help="seconds before a run is killed")
-    init.add_argument(
-        "--recursive",
-        action="store_true",
-        help="recursive mode: the agent also improves its research harness in lab/",
-    )
     init.set_defaults(func=cmd_init)
 
     check = sub.add_parser("check", help="run the experiment once as-is, without git or records")
@@ -1581,15 +1550,13 @@ def build_parser() -> argparse.ArgumentParser:
     status.set_defaults(func=cmd_status)
 
     probe = sub.add_parser(
-        "probe", help="recursive mode: run lab/probe.sh, your own evaluation, without committing"
+        "probe", help="run lab/probe.sh, your own evaluation, without committing"
     )
     probe.add_argument("-m", "--message", required=True, help="what this probe checks")
     probe.add_argument("args", nargs=argparse.REMAINDER, help="arguments passed to lab/probe.sh")
     probe.set_defaults(func=cmd_probe)
 
-    review = sub.add_parser(
-        "review", help="recursive mode: print the review procedure and the evidence for it"
-    )
+    review = sub.add_parser("review", help="print the review procedure and the evidence for it")
     review.set_defaults(func=cmd_review)
 
     return parser

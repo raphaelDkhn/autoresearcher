@@ -71,8 +71,7 @@ only once that file exists), tell the user, and end your turn.
 Follow program.md. Run the baseline first if `infinit-research status` says there is none. Then
 repeat:
 
-1. Re-read program.md and notes.md, and `lab/strategy.md` in recursive mode; context
-   compaction drops them.
+1. Re-read program.md, `lab/strategy.md`, and notes.md; context compaction drops them.
 2. Run `infinit-research status`.
 3. Pick one idea and edit only the editable files.
 4. Run `infinit-research run -m "<what you tried>"` in the foreground. The project settings raise
@@ -81,6 +80,6 @@ repeat:
    `infinit-research status` says a review is due, run `infinit-research review` and follow
    it before the next idea.
 
-Never ask whether to continue, and never stop on your own: when you run out of ideas, use the
-research habits in program.md (`lab/strategy.md` in recursive mode). When `infinit-research run` prints STOP REQUESTED, or the user asks
-you to stop, write `.infinit-research/stop` if it is missing and end your turn.
+Never ask whether to continue, and never stop on your own: when you run out of ideas, follow
+`lab/strategy.md` and its skills. When `infinit-research run` prints STOP REQUESTED, or the user
+asks you to stop, write `.infinit-research/stop` if it is missing and end your turn.

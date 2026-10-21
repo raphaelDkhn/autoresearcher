@@ -42,15 +42,10 @@ Ask with AskUserQuestion, skipping whatever the idea already answers:
 3. The budget per experiment (2 to 10 minutes; 5 minutes is about 10 runs an hour) and where
    it runs.
 4. The data: where it comes from, its size, and how evaluation data stays hidden from the
-   candidate.
+   candidate and from the agent's own evaluations ([harness-guide.md](harness-guide.md),
+   rule 12).
 5. How the metric could be gamed, and which rules must go in the research brief.
 6. The target directory: a new folder, or the current repo (adopt mode, below).
-7. The mode. Auto, the default: the agent improves the solution. Recursive: it also improves
-   its own research harness in `lab/` (a short strategy, on-demand skills, its own
-   evaluations, and a library of lessons) in a review every 10 runs. The harness that judges
-   runs stays frozen either way. Recursive mode needs evaluation data drawn fresh every run
-   ([harness-guide.md](harness-guide.md), rule 12): the agent's own evaluations can read any
-   file in the project, so a fixed validation set, such as a val shard, stays in auto mode.
 
 ## 3. Design and write the harness
 
@@ -75,7 +70,8 @@ infinit-research init --metric ns_per_element --goal minimize \
   --run "cargo run --release --locked --bin bench" --editable "src/sort.rs" --timeout 300
 ```
 
-Add `--recursive` for recursive mode: it also seeds `lab/` and lists it in `.gitignore`.
+`init` also seeds `lab/`, the research harness the agent improves (a short strategy,
+on-demand skills, its own evaluations, and a library of lessons), and lists it in `.gitignore`.
 
 Fill in the **Research brief** section of the generated `program.md`: the question, how the
 harness measures, which files to read first, the rules that code can't enforce, and the
@@ -86,8 +82,10 @@ hardware. Leave the rest of `program.md` as generated.
 Same steps, but write only what is missing. For a clone of karpathy/autoresearch:
 `git mv program.md program.orig.md`, then
 `infinit-research init --metric val_bpb --goal minimize --run "uv run train.py" --editable train.py --timeout 600`,
-merge the goal and rules of `program.orig.md` into the brief, and delete it. Upstream needs an
-NVIDIA GPU; on a Mac, start from an MLX or MPS fork instead.
+merge the goal and rules of `program.orig.md` into the brief, and delete it. Its val shard is
+a fixed evaluation set, so the brief also needs the rule from
+[harness-guide.md](harness-guide.md), rule 12. Upstream needs an NVIDIA GPU; on a Mac, start
+from an MLX or MPS fork instead.
 
 ## 4. Validate
 
@@ -97,8 +95,8 @@ NVIDIA GPU; on a Mac, start from an MLX or MPS fork instead.
 2. Run `infinit-research check` twice more and compare the metric. Set `min_improvement` in
    `infinit-research.toml` to about twice the relative spread, (max - min) / mean, or leave it at
    0 when the runs are identical. It is a fraction of the best, so the bar shrinks as the
-   metric improves. In recursive mode the two checks must also print different `eval_seed`
-   values; matching seeds mean a fixed evaluation set, so draw it fresh or use auto mode.
+   metric improves. If the harness draws its evaluation data fresh, the two checks must also
+   print different `eval_seed` values; matching seeds mean the set is fixed after all.
 3. Floor: temporarily swap in a trivial candidate (a constant, a no-op). `check` must score
    clearly worse. Restore the real one.
 4. Leak: temporarily make the candidate read the evaluation data or call the oracle after
@@ -120,6 +118,6 @@ Claude Code ignores the project's `.claude/settings.json`:
 - Optional, for a long night: restart sessions that end on an API error:
   `caffeinate -is sh -c 'until [ -f .infinit-research/stop ]; do claude -p "/infinit-research:run" --permission-mode dontAsk; sleep 60; done'`
 - Progress: open `.infinit-research/report.html`; it refreshes after every run.
-- Recursive mode: the agent keeps its research method in `lab/` and reviews it every 10 runs.
+- The agent keeps its research method in `lab/` and reviews it every 10 runs.
   The report's "Research harness" card shows each window of runs, and
   `.infinit-research/lab-versions/` keeps every version of `lab/`.

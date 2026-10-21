@@ -3,6 +3,7 @@
 import json
 import os
 import shlex
+import shutil
 import signal
 import subprocess
 import sys
@@ -172,15 +173,6 @@ def project(make: Callable[..., Project]) -> Project:
     return make()
 
 
-@pytest.fixture
-def lab_project(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Project:
-    root = toy_repo(tmp_path, monkeypatch)
-    assert cli.main([*init_args(), "--recursive"]) == 0
-    git(root, "add", "-A")
-    git(root, "commit", "-qm", "scaffold")
-    return Project(root)
-
-
 def wait_for(path: Path, seconds: float = 20) -> None:
     deadline = time.monotonic() + seconds
     while not path.exists():
@@ -216,8 +208,9 @@ def test_init_writes_a_complete_project(project: Project) -> None:
     program = (root / "program.md").read_text()
     assert "{{" not in program
     assert "`loss`" in program and "`x.txt`" in program
-    assert "## Recursive mode" not in program
-    assert not (root / "lab").exists()
+    assert "## Your research harness" in program
+    assert (root / "lab" / "strategy.md").read_text().startswith("# Research strategy")
+    assert (root / "lab" / "skills" / "when-stuck.md").exists()
     assert "## Steering (human)" in (root / "notes.md").read_text()
     ignored = set((root / ".gitignore").read_text().splitlines())
     assert {
@@ -225,14 +218,15 @@ def test_init_writes_a_complete_project(project: Project) -> None:
         "notes.md",
         "__pycache__/",
         ".claude/settings.local.json",
+        "lab/",
     } <= ignored
-    assert "lab/" not in ignored
     settings = json.loads((root / ".claude" / "settings.json").read_text())
-    allow = settings["permissions"]["allow"]
-    assert {"Bash(infinit-research run *)", "Edit(/x.txt)", "Edit(/notes.md)"} <= set(allow)
-    assert not [rule for rule in allow if "lab" in rule or "review" in rule]
+    allow = set(settings["permissions"]["allow"])
+    assert {"Bash(infinit-research run *)", "Edit(/x.txt)", "Edit(/notes.md)"} <= allow
+    assert {"Edit(/lab/**)", "Bash(infinit-research review)"} <= allow
     assert settings["env"]["BASH_MAX_TIMEOUT_MS"] == "150000"
     assert Path(git(root, "rev-parse", "--show-toplevel")).resolve() == root
+    assert project.git("status", "--porcelain") == ""
 
 
 def test_init_refuses_to_overwrite_program_md(
@@ -797,51 +791,42 @@ def test_head_moving_during_a_run_is_reported(make: Callable[..., Project]) -> N
     assert project.records()[-1]["status"] == "timeout"
 
 
-# recursive mode ------------------------------------------------------------------------
+# the research harness in lab/ ----------------------------------------------------------
 
 
-def test_recursive_init_seeds_the_lab(lab_project: Project) -> None:
-    root = lab_project.root
-    assert (root / "lab" / "strategy.md").read_text().startswith("# Research strategy")
-    assert (root / "lab" / "skills" / "when-stuck.md").exists()
-    assert "lab/" in (root / ".gitignore").read_text().splitlines()
-    allow = json.loads((root / ".claude" / "settings.json").read_text())["permissions"]["allow"]
-    assert {"Edit(/lab/**)", "Bash(infinit-research review)"} <= set(allow)
-    program = (root / "program.md").read_text()
-    assert "## Recursive mode" in program and "{{" not in program
-    assert lab_project.git("status", "--porcelain") == ""
-
-
-def test_recursive_init_refuses_an_existing_lab(
+def test_init_refuses_an_existing_lab(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     monkeypatch.chdir(tmp_path)
     (tmp_path / "lab").mkdir()
-    assert cli.main([*init_args(), "--recursive"]) == 2
+    assert cli.main(init_args()) == 2
     assert "lab already exists" in capsys.readouterr().err
     assert not (tmp_path / "infinit-research.toml").exists()
 
 
-def test_runs_record_and_save_the_lab_version(lab_project: Project) -> None:
-    lab = lab_project.root / "lab"
-    lab_project.run("baseline")
-    first = lab_project.records()[-1]["lab"]
-    saved = lab_project.state / "lab-versions" / first
+@pytest.mark.parametrize("command", [["check"], ["run", "-m", "baseline"]])
+def test_a_fresh_clone_gets_the_seed_lab(
+    project: Project, capsys: pytest.CaptureFixture[str], command: list[str]
+) -> None:
+    shutil.rmtree(project.root / "lab")  # gitignored, so a clone has none
+    assert cli.main(command) == 0
+    assert "seeded lab/" in capsys.readouterr().err
+    assert (project.root / "lab" / "strategy.md").read_text().startswith("# Research strategy")
+
+
+def test_runs_record_and_save_the_lab_version(project: Project) -> None:
+    lab = project.root / "lab"
+    project.run("baseline")
+    first = project.records()[-1]["lab"]
+    saved = project.state / "lab-versions" / first
     assert (saved / "strategy.md").read_text() == (lab / "strategy.md").read_text()
     assert (saved / "skills" / "when-stuck.md").exists()
-    assert (lab_project.run_dir("0001") / "notes.md").exists()
+    assert (project.run_dir("0001") / "notes.md").exists()
     with (lab / "library.md").open("a") as handle:
         handle.write("a lesson\n")
-    lab_project.set_x(1)
-    lab_project.run("next")
-    assert lab_project.records()[-1]["lab"] not in ("", first)
-
-
-def test_auto_mode_records_have_no_lab(project: Project) -> None:
-    project.run("baseline")
-    assert "lab" not in project.records()[-1]
-    assert not (project.run_dir("0001") / "notes.md").exists()
-    assert not (project.state / "lab-versions").exists()
+    project.set_x(1)
+    project.run("next")
+    assert project.records()[-1]["lab"] not in ("", first)
 
 
 def drop_strategy(lab: Path) -> None:
@@ -870,94 +855,92 @@ def drop_named_skill(lab: Path) -> None:
     ],
 )
 def test_runs_refuse_a_lab_that_breaks_its_form(
-    lab_project: Project,
+    project: Project,
     capsys: pytest.CaptureFixture[str],
     change: Callable[[Path], None],
     message: str,
 ) -> None:
-    change(lab_project.root / "lab")
-    assert lab_project.run("baseline") == 2
+    change(project.root / "lab")
+    assert project.run("baseline") == 2
     assert message in capsys.readouterr().err
-    assert lab_project.records() == []
-    assert not (lab_project.state / "runs").exists() or not any(
-        (lab_project.state / "runs").iterdir()
-    )
+    assert project.records() == []
+    assert not (project.state / "runs").exists() or not any((project.state / "runs").iterdir())
 
 
 def test_runs_refuse_a_lab_too_big_to_save(
-    lab_project: Project, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    project: Project, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     monkeypatch.setattr(cli, "LAB_MAX_BYTES", 100)
-    assert lab_project.run("baseline") == 2
+    assert project.run("baseline") == 2
     assert "lab/ holds" in capsys.readouterr().err
 
 
-def test_lab_is_hidden_while_the_harness_runs(lab_project: Project) -> None:
-    lab_project.set_x("lab")
-    lab_project.run("baseline")
-    assert lab_project.records()[-1]["metrics"]["lab_visible"] == 0
-    assert (lab_project.root / "lab" / "strategy.md").exists()
+def test_lab_is_hidden_while_the_harness_runs(project: Project) -> None:
+    project.set_x("lab")
+    project.run("baseline")
+    assert project.records()[-1]["metrics"]["lab_visible"] == 0
+    assert (project.root / "lab" / "strategy.md").exists()
     assert cli.main(["check"]) == 0
-    assert (lab_project.root / "lab" / "strategy.md").exists()
+    assert (project.root / "lab" / "strategy.md").exists()
 
 
-def test_a_run_that_writes_lab_crashes(lab_project: Project) -> None:
-    lab_project.run("baseline")
-    lab_project.set_x("make-lab")
-    lab_project.run("plants a lab")
-    record = lab_project.records()[-1]
+def test_a_run_that_writes_lab_crashes(project: Project) -> None:
+    project.run("baseline")
+    project.set_x("make-lab")
+    project.run("plants a lab")
+    record = project.records()[-1]
     assert record["status"] == "crash"
     assert record["reason"] is not None and "the run wrote lab/" in record["reason"]
-    assert (lab_project.run_dir(record["id"]) / "stray" / "lab" / "planted.txt").exists()
-    assert not (lab_project.root / "lab" / "planted.txt").exists()
-    assert (lab_project.root / "lab" / "strategy.md").exists()
+    assert (project.run_dir(record["id"]) / "stray" / "lab" / "planted.txt").exists()
+    assert not (project.root / "lab" / "planted.txt").exists()
+    assert (project.root / "lab" / "strategy.md").exists()
 
 
 def test_a_killed_run_hides_lab_until_status_or_the_next_run(
-    lab_project: Project, capsys: pytest.CaptureFixture[str]
+    project: Project, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    lab_project.run("baseline")
-    lab_project.set_x("sleep")
-    proc = spawn_cli(lab_project.root, "sleepy")
-    marker = lab_project.run_dir("0002") / "started"
+    project.run("baseline")
+    project.set_x("sleep")
+    proc = spawn_cli(project.root, "sleepy")
+    marker = project.run_dir("0002") / "started"
     wait_for(marker)
     proc.kill()
     proc.communicate(timeout=30)
-    assert not (lab_project.root / "lab").exists()
+    assert not (project.root / "lab").exists()
     assert cli.main(["status"]) == 0
     assert_group_dead(int(marker.read_text()))
-    assert (lab_project.root / "lab" / "strategy.md").exists()
-    lab_project.set_x(1)
-    assert lab_project.run("next idea") == 2
+    assert (project.root / "lab" / "strategy.md").exists()
+    project.set_x(1)
+    assert project.run("next idea") == 2
     assert "recovered from run #0002" in capsys.readouterr().err
-    assert lab_project.records()[-1]["lab"] == lab_project.records()[0]["lab"]
+    assert project.records()[-1]["lab"] == project.records()[0]["lab"]
 
 
 def test_a_review_is_due_after_each_window_until_lab_changes(
-    lab_project: Project, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    project: Project, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     monkeypatch.setattr(report, "WINDOW_RUNS", 2)
-    lab_project.run("baseline")
+    project.run("baseline")
     assert "review due" not in capsys.readouterr().out
-    lab_project.set_x(1)
-    lab_project.run("x=1")
+    project.set_x(1)
+    project.run("x=1")
     assert "review due" in capsys.readouterr().out
     cli.main(["status"])
     assert "review due" in capsys.readouterr().out
-    with (lab_project.root / "lab" / "reviews.md").open("a") as handle:
+    with (project.root / "lab" / "reviews.md").open("a") as handle:
         handle.write("## Review after #0002\n")
     cli.main(["status"])
     assert "review due" not in capsys.readouterr().out
 
 
 def test_review_prints_the_procedure_and_the_evidence(
-    lab_project: Project, capsys: pytest.CaptureFixture[str]
+    project: Project, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    lab_project.run("baseline")
-    write_probe(lab_project, 'echo "quick: 4"\n')
+    project.run("baseline")
+    write_probe(project, 'echo "quick: 4"\n')
     cli.main(["probe", "-m", "screen x=1"])
-    lab_project.set_x(1)
-    lab_project.run("x=1")
+    project.set_x(1)
+    project.run("x=1")
     capsys.readouterr()
     assert cli.main(["review"]) == 0
     out = capsys.readouterr().out
@@ -972,72 +955,56 @@ def write_probe(project: Project, body: str) -> None:
 
 
 def test_a_probe_runs_the_agents_evaluation_without_committing(
-    lab_project: Project, capsys: pytest.CaptureFixture[str]
+    project: Project, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    lab_project.run("baseline")
-    head = lab_project.head()
-    write_probe(lab_project, 'echo "arg: $1"\necho hi > "$INFINIT_RESEARCH_RUN_DIR/out.txt"\n')
-    lab_project.set_x(1)  # an idea the agent screens before spending a run on it
+    project.run("baseline")
+    head = project.head()
+    write_probe(project, 'echo "arg: $1"\necho hi > "$INFINIT_RESEARCH_RUN_DIR/out.txt"\n')
+    project.set_x(1)  # an idea the agent screens before spending a run on it
     capsys.readouterr()
     assert cli.main(["probe", "-m", "screen x=1", "7"]) == 0
     out = capsys.readouterr().out
     assert "probe #0001 ok" in out and "arg=7" in out and "out.txt" in out
-    (probe,) = cli.read_probes(lab_project.root)
+    (probe,) = cli.read_probes(project.root)
     assert (probe["status"], probe["metrics"], probe["runs"]) == ("ok", {"arg": 7.0}, 1)
-    assert (lab_project.state / "lab-versions" / probe["lab"] / "probe.sh").exists()
-    assert lab_project.head() == head
-    assert (lab_project.root / "x.txt").read_text() == "1\n"
-    assert len(lab_project.records()) == 1
+    assert (project.state / "lab-versions" / probe["lab"] / "probe.sh").exists()
+    assert project.head() == head
+    assert (project.root / "x.txt").read_text() == "1\n"
+    assert len(project.records()) == 1
 
 
-def test_a_probe_that_writes_into_the_repo_is_undone(lab_project: Project) -> None:
-    write_probe(lab_project, "echo oops > stray.txt\necho 2 > x.txt\n")
+def test_a_probe_that_writes_into_the_repo_is_undone(project: Project) -> None:
+    write_probe(project, "echo oops > stray.txt\necho 2 > x.txt\n")
     assert cli.main(["probe", "-m", "messy"]) == 0
-    (probe,) = cli.read_probes(lab_project.root)
+    (probe,) = cli.read_probes(project.root)
     assert probe["status"] == "crash"
     assert probe["reason"] is not None and "stray.txt" in probe["reason"]
-    assert not (lab_project.root / "stray.txt").exists()
-    assert (lab_project.root / "x.txt").read_text() == "2\n"  # editable, so the probe may tune it
+    assert not (project.root / "stray.txt").exists()
+    assert (project.root / "x.txt").read_text() == "2\n"  # editable, so the probe may tune it
 
 
-def test_probe_needs_a_probe_script(
-    lab_project: Project, capsys: pytest.CaptureFixture[str]
-) -> None:
+def test_probe_needs_a_probe_script(project: Project, capsys: pytest.CaptureFixture[str]) -> None:
     assert cli.main(["probe", "-m", "nothing to run"]) == 2
     assert "write lab/probe.sh first" in capsys.readouterr().err
 
 
-def test_probe_belongs_to_recursive_mode(
-    project: Project, capsys: pytest.CaptureFixture[str]
-) -> None:
-    assert cli.main(["probe", "-m", "no lab"]) == 2
-    assert "recursive mode" in capsys.readouterr().err
-
-
-def test_a_killed_probe_is_cleaned_up_by_the_next_run(lab_project: Project) -> None:
+def test_a_killed_probe_is_cleaned_up_by_the_next_run(project: Project) -> None:
     pgid = f'{shlex.quote(sys.executable)} -c "import os; print(os.getpgid(0))"'
     marker_tmp = '"$INFINIT_RESEARCH_RUN_DIR/started.tmp"'
     # mv makes the marker appear only once it holds the id, so the test never reads it empty
     script = (
         f'{pgid} > {marker_tmp}\nmv {marker_tmp} "$INFINIT_RESEARCH_RUN_DIR/started"\nsleep 60\n'
     )
-    write_probe(lab_project, script)
+    write_probe(project, script)
     command = [sys.executable, "-m", "infinit_research.cli", "probe", "-m", "slow"]
-    proc = subprocess.Popen(command, cwd=lab_project.root, stdout=subprocess.PIPE, text=True)
-    marker = lab_project.state / "probes" / "0001" / "started"
+    proc = subprocess.Popen(command, cwd=project.root, stdout=subprocess.PIPE, text=True)
+    marker = project.state / "probes" / "0001" / "started"
     wait_for(marker)
     proc.kill()
     proc.communicate(timeout=30)
-    assert lab_project.run("baseline") == 0
+    assert project.run("baseline") == 0
     assert_group_dead(int(marker.read_text()))
-    assert lab_project.records()[-1]["status"] == "keep"
-
-
-def test_review_belongs_to_recursive_mode(
-    project: Project, capsys: pytest.CaptureFixture[str]
-) -> None:
-    assert cli.main(["review"]) == 2
-    assert "recursive mode" in capsys.readouterr().err
+    assert project.records()[-1]["status"] == "keep"
 
 
 # plugin launcher -----------------------------------------------------------------------
