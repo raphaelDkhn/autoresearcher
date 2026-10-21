@@ -46,12 +46,14 @@ STATE = ".infinit-research"
 LAB = "lab"
 STRATEGY = "strategy.md"
 PROBE = "probe.sh"
+REVIEWS = "reviews.md"
 HIDDEN_LAB = "lab.hidden"
 LAB_VERSIONS = "lab-versions"
 LAB_SKIP = ("__pycache__", ".DS_Store")
 STRATEGY_LINES = 80  # strategy.md is read every iteration, so it has a budget
 LAB_MAX_BYTES = 2 * 1024**2
 SKILL_MENTION = re.compile(rf"{LAB}/skills/([\w.-]+\.md)")
+REVIEW_HEADING = re.compile(r"^## Review after #(\d+)", re.MULTILINE)
 GOALS = ("minimize", "maximize")
 MANIFEST_KEYS = {
     "metric": ("name", "goal", "min_improvement"),
@@ -476,7 +478,7 @@ def quarantine(root: Path, run_dir: Path, spare: tuple[str, ...] = ()) -> list[s
     tracked = [path for code, path in dirty if code != "??"]
     if tracked:
         patch = git(root, "--literal-pathspecs", "diff", "--binary", "HEAD", "--", *tracked)
-        (stray / "tracked.patch").write_text(patch)
+        (stray / "tracked.patch").write_text(patch, encoding="utf-8", errors="surrogateescape")
         git(root, "--literal-pathspecs", "restore", "--staged", "--worktree", "--", *tracked)
     for path in (path for code, path in dirty if code == "??"):
         target = stray / path
@@ -595,13 +597,17 @@ def write_lock(fd: int, state: dict[str, Any]) -> None:
         os.pwrite(fd, json.dumps(state).encode(), 0)
 
 
-def settle(root: Path, state: dict[str, Any]) -> None:
+def settle(root: Path, fd: int) -> dict[str, Any]:
     """Stop what a killed controller left running, then make sure lab/ is in place."""
+    state = read_lock(fd)
     if isinstance(state.get("pgid"), int):
         # shortcut: a dead group's id could in theory be reused by now; compare process start
         # times if that ever matters.
         kill_leftovers(state["pgid"])
+        state["pgid"] = None  # once: by the next command the id may belong to another program
+        write_lock(fd, state)
     restore_lab(root)
+    return state
 
 
 def recover(root: Path, fd: int, manifest: Manifest) -> None:
@@ -610,23 +616,26 @@ def recover(root: Path, fd: int, manifest: Manifest) -> None:
     The interrupted experiment's changes stay in the working tree, uncommitted, next to any
     edits made since; the caller must look at them before running again.
     """
-    state = read_lock(fd)
-    settle(root, state)
+    state = settle(root, fd)
     if not state:
         return
     if "probe" in state:  # a probe commits nothing, so there is nothing else to undo
         write_lock(fd, {})
         return
-    recorded = any(record["id"] == state["id"] for record in read_records(root))
-    if not recorded:
+    record = next((r for r in read_records(root) if r["id"] == state["id"]), None)
+    if record is None:
         quarantine(root, root / STATE / "runs" / state["id"], spare=manifest.editable)
-        commit = state.get("commit")
-        if commit and head(root) == commit:
-            git(root, "update-ref", archive_ref(state["branch"], state["id"]), commit)
-            git(root, "reset", "-q", "--soft", state["parent"])
+    commit = state.get("commit")
+    kept = record is not None and record["status"] == "keep"
+    # Only a recorded keep stays committed: the kill can also land after a discard's verdict.
+    undo = bool(commit) and not kept and head(root) == commit
+    if undo:
+        git(root, "update-ref", archive_ref(state["branch"], state["id"]), commit)
+        git(root, "reset", "-q", state["parent"])  # mixed, so `git restore` gives the parent
+    if record is None:
         append_record(root, interrupted_record(state))
     write_lock(fd, {})
-    if not recorded:
+    if record is None or undo:
         raise UsageError(
             f"recovered from run #{state['id']}, whose controller was killed mid-run. Its "
             "changes are uncommitted in the working tree (see `git status`); keep or "
@@ -779,10 +788,12 @@ def restore_lab(root: Path) -> None:
 
 
 def review_due(root: Path, records: list[Record]) -> bool:
-    """A window of runs just ended and lab/ has not changed since its last run."""
-    if not records or len(records) % report.WINDOW_RUNS:
-        return False
-    return records[-1]["lab"] == lab_hash(lab_files(root))
+    """A window of runs just ended and lab/reviews.md has no section for its last run yet."""
+    if not records or len(records) % report.WINDOW_RUNS or not (root / LAB).is_dir():
+        return False  # no lab/ means a live run hides it, and that run reports when it ends
+    path = root / LAB / REVIEWS
+    text = path.read_text(encoding="utf-8", errors="replace") if path.exists() else ""
+    return int(records[-1]["id"]) not in {int(n) for n in REVIEW_HEADING.findall(text)}
 
 
 def review_line() -> str:
@@ -890,11 +901,11 @@ def run_process(
     signals: Signals,
     on_spawn: Callable[[int], None],
 ) -> Outcome:
-    if signals.received:
-        return Outcome("crash", 0.0, f"interrupted by {signal_name(signals.received)}")
     env = {**os.environ, "INFINIT_RESEARCH_RUN_DIR": str(run_dir), "PYTHONUNBUFFERED": "1"}
     start = time.monotonic()
     with (run_dir / "run.log").open("wb") as log:
+        if signals.received:  # after creating the log, which every caller reads
+            return Outcome("crash", 0.0, f"interrupted by {signal_name(signals.received)}")
         proc = subprocess.Popen(
             ["/bin/sh", "-c", manifest.command],
             cwd=root,
@@ -1063,10 +1074,6 @@ def revert(root: Path, trial: Trial) -> None:
         ) from exc
 
 
-def format_number(value: float) -> str:
-    return f"{value:.6g}"
-
-
 def percent(value: float, reference: float) -> str:
     if reference == 0:
         return ""
@@ -1080,17 +1087,18 @@ def format_verdict(record: Record, metric: str, best_before: float | None) -> st
     if value is None:
         return f"{prefix} {record['reason']}  {seconds}"
     if best_before is None:
-        return f"{prefix} {metric} {format_number(value)} (baseline)  {seconds}"
+        return f"{prefix} {metric} {report.fmt(value)} (baseline)  {seconds}"
     label = "was" if record["status"] == "keep" else "best"
-    versus = f"{label} {format_number(best_before)}{percent(value, best_before)}"
-    return f"{prefix} {metric} {format_number(value)} ({versus})  {seconds}"
+    versus = f"{label} {report.fmt(best_before)}{percent(value, best_before)}"
+    return f"{prefix} {metric} {report.fmt(value)} ({versus})  {seconds}"
 
 
 def verdict_details(root: Path, trial: Trial, record: Record) -> list[str]:
     lines = []
     if record["status"] != "keep" and trial.commit:
         files = " ".join(shlex.quote(p) for p in changed_files(root, trial.parent, trial.commit))
-        lines.append(f"  restore with: git restore --source={trial.commit[:7]} -- {files}")
+        if files:  # a run that only deleted files leaves nothing to restore
+            lines.append(f"  restore with: git restore --source={trial.commit[:7]} -- {files}")
     return lines + output_lines(root, trial.run_dir, record["status"] in ("crash", "timeout"))
 
 
@@ -1133,8 +1141,8 @@ def after_run(root: Path, manifest: Manifest, branch: str) -> None:
 def refresh_report(root: Path, manifest: Manifest, branch: str, records: list[Record]) -> None:
     title = f"{root.name} · {branch}"
     try:
-        report.write_report(root / STATE, title, manifest.metric, manifest.goal, records)
-    except (OSError, ValueError) as exc:  # ValueError: a probes.jsonl line that is not JSON
+        report.write_report(root / STATE, title, manifest, records, read_probes(root))
+    except (OSError, UsageError) as exc:  # UsageError: a probes.jsonl line that is not JSON
         print(f"infinit-research: warning: could not write the report: {exc}", file=sys.stderr)
 
 
@@ -1197,7 +1205,7 @@ def probe_status(outcome: Outcome, wrote: list[str]) -> tuple[str, str | None]:
 
 
 def probe_line(probe: Probe) -> str:
-    shown = " ".join(f"{key}={format_number(value)}" for key, value in probe["metrics"].items())
+    shown = " ".join(f"{key}={report.fmt(value)}" for key, value in probe["metrics"].items())
     reason = f"  [{probe['reason']}]" if probe["reason"] else ""
     return (
         f"probe #{probe['id']} {probe['status']:<8} {shown or 'no metrics'}  "
@@ -1221,7 +1229,8 @@ def cmd_probe(args: argparse.Namespace) -> int:
         probe_id = next_id(folder, read_probes(root))
         run_dir = folder / probe_id
         run_dir.mkdir(parents=True)
-        command = shlex.join(["/bin/sh", script.relative_to(root).as_posix(), *args.args])
+        extra = args.args[1:] if args.args[:1] == ["--"] else args.args
+        command = shlex.join(["/bin/sh", script.relative_to(root).as_posix(), *extra])
         write_lock(fd, {"probe": probe_id})
         outcome = execute(
             root,
@@ -1260,7 +1269,7 @@ def cmd_check(_args: argparse.Namespace) -> int:
     root = find_root(Path.cwd())
     manifest = load_manifest(root)
     with project_lock(root) as fd, Signals() as signals:
-        settle(root, read_lock(fd))
+        settle(root, fd)
         run_dir = root / STATE / "check"
         if run_dir.exists():
             shutil.rmtree(run_dir)
@@ -1270,7 +1279,7 @@ def cmd_check(_args: argparse.Namespace) -> int:
         parsed = parse_log(run_dir / "run.log", manifest.metric)
         wrote = sorted({path for _, path in dirty_paths(root)} - before)
         status, reason = classify(outcome, parsed, wrote)
-    shown = ", ".join(f"{key}={format_number(value)}" for key, value in parsed.metrics.items())
+    shown = ", ".join(f"{key}={report.fmt(value)}" for key, value in parsed.metrics.items())
     print(f"check {status}  {outcome.seconds:.1f}s  {reason or ''}".rstrip())
     print(f"  metrics: {shown or 'none'}")
     if status != "ok":
@@ -1297,14 +1306,14 @@ def best_line(records: list[Record]) -> str:
     assert base["metric"] is not None and best["metric"] is not None
     change = percent(best["metric"], base["metric"]).lstrip(", ")
     return (
-        f"baseline {format_number(base['metric'])} -> best {format_number(best['metric'])}"
+        f"baseline {report.fmt(base['metric'])} -> best {report.fmt(best['metric'])}"
         f"{f' ({change})' if change else ''} at #{best['id']} {best['commit'][:7]} "
         f"{best['description']!r}"
     )
 
 
 def run_line(record: Record) -> str:
-    value = format_number(record["metric"]) if record["metric"] is not None else "-"
+    value = report.fmt(record["metric"]) if record["metric"] is not None else "-"
     reason = f"  [{record['reason']}]" if record["reason"] else ""
     return (
         f"  #{record['id']} {record['status']:<8} {value:>12}  {record['seconds']:>7g}s  "
@@ -1324,7 +1333,7 @@ def cmd_status(args: argparse.Namespace) -> int:
     if (root / STATE / HIDDEN_LAB).exists():
         # A live run holds the lock and puts lab/ back itself; only a killed one leaves it hidden.
         with contextlib.suppress(UsageError), project_lock(root) as fd:
-            settle(root, read_lock(fd))
+            settle(root, fd)
     branch = current_branch(root) or "HEAD"
     records = branch_records(root, branch)
     print(status_text(manifest, branch, records, args.n))
@@ -1482,6 +1491,11 @@ def refuse_existing(root: Path) -> None:
     for name in (MANIFEST, PROGRAM, LAB):
         if (root / name).exists():
             raise UsageError(f"{name} already exists{hints.get(name, '')}")
+    if git_ok(root, "ls-files", "--error-unmatch", "--", NOTES):
+        raise UsageError(
+            f"{NOTES} is tracked by git, but the agent rewrites it after every run; move it "
+            f"aside first (git mv {NOTES} notes.orig.md)"
+        )
 
 
 def copy_seed(source: Traversable, target: Path) -> None:
@@ -1503,6 +1517,7 @@ def cmd_init(args: argparse.Namespace) -> int:
         raise UsageError(f"an infinit research project must be a git repository root; {top} is")
     text = render_manifest(args.metric, args.goal, args.run_command, args.timeout, args.editable)
     manifest = parse_manifest(text)
+    write_claude_settings(root, manifest)  # first: it can fail, and init refuses to run twice
     if top is None:
         git(root, "init", "-q", "-b", "main")
     (root / MANIFEST).write_text(text, encoding="utf-8")
@@ -1511,7 +1526,6 @@ def cmd_init(args: argparse.Namespace) -> int:
         (root / NOTES).write_text(NOTES_SEED, encoding="utf-8")
     copy_seed(resources.files("infinit_research").joinpath(LAB), root / LAB)
     update_gitignore(root)
-    write_claude_settings(root, manifest)
     print(f"initialized an infinit research project in {root}")
     print(
         "next: fill in the research brief in program.md, run `infinit-research check`, then commit"
@@ -1553,7 +1567,11 @@ def build_parser() -> argparse.ArgumentParser:
         "probe", help="run lab/probe.sh, your own evaluation, without committing"
     )
     probe.add_argument("-m", "--message", required=True, help="what this probe checks")
-    probe.add_argument("args", nargs=argparse.REMAINDER, help="arguments passed to lab/probe.sh")
+    probe.add_argument(
+        "args",
+        nargs=argparse.REMAINDER,
+        help="arguments for lab/probe.sh; put -- before them when the first starts with -",
+    )
     probe.set_defaults(func=cmd_probe)
 
     review = sub.add_parser("review", help="print the review procedure and the evidence for it")

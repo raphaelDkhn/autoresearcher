@@ -64,6 +64,9 @@ if mode == "touch-tracked":
     with open("README", "a") as handle:
         handle.write("changed by the run\n")
     mode = "1"
+if mode == "touch-latin1":
+    pathlib.Path("README").write_bytes(b"caf\xe9\n")
+    mode = "1"
 if mode == "artifact":
     (run_dir / "plot.png").write_bytes(b"\x89PNG")
     mode = "2"
@@ -240,6 +243,18 @@ def test_init_refuses_to_overwrite_program_md(
     assert not (tmp_path / "infinit-research.toml").exists()
 
 
+def test_init_refuses_a_tracked_notes_md(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    git(tmp_path, "init", "-q")
+    (tmp_path / "notes.md").write_text("my project notes\n")
+    git(tmp_path, "add", "notes.md")
+    assert cli.main(init_args()) == 2
+    assert "notes.md is tracked by git" in capsys.readouterr().err
+    assert not (tmp_path / "infinit-research.toml").exists()
+
+
 def test_init_refuses_an_existing_project(
     project: Project, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -274,6 +289,19 @@ def test_init_merges_existing_claude_settings(
         "BASH_MAX_TIMEOUT_MS": "999999999",
         "BASH_DEFAULT_TIMEOUT_MS": "150000",
     }
+
+
+def test_init_can_rerun_after_fixing_broken_claude_settings(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    settings = tmp_path / ".claude" / "settings.json"
+    settings.parent.mkdir()
+    settings.write_text("{ broken")
+    assert cli.main(init_args()) == 2
+    assert "not valid JSON" in capsys.readouterr().err
+    settings.write_text("{}")
+    assert cli.main(init_args()) == 0
 
 
 @pytest.mark.parametrize("editable", ["*", "*.md", ".claude/*", "../x.txt", "/abs.txt"])
@@ -578,6 +606,16 @@ def test_failed_runs_are_crashes_and_reverted(project: Project, mode: str, reaso
     assert time.monotonic() - started < 20
 
 
+def test_a_run_that_only_deletes_files_prints_no_restore_command(
+    project: Project, capsys: pytest.CaptureFixture[str]
+) -> None:
+    project.run("baseline")
+    (project.root / "x.txt").unlink()
+    project.run("delete x.txt")
+    assert project.records()[-1]["status"] == "crash"
+    assert "restore with" not in capsys.readouterr().out
+
+
 def test_files_written_into_the_repo_are_moved_aside(
     project: Project, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -592,15 +630,20 @@ def test_files_written_into_the_repo_are_moved_aside(
     assert "moved to .infinit-research/runs/0002/stray/" in capsys.readouterr().out
 
 
-def test_writes_to_tracked_files_are_undone_and_saved(project: Project) -> None:
+@pytest.mark.parametrize(
+    ("mode", "written"), [("touch-tracked", b"changed by the run"), ("touch-latin1", b"caf\xe9")]
+)
+def test_writes_to_tracked_files_are_undone_and_saved(
+    project: Project, mode: str, written: bytes
+) -> None:
     project.run("baseline")
-    project.set_x("touch-tracked")
+    project.set_x(mode)
     project.run("touches README")
     record = project.records()[-1]
     assert record["status"] == "crash"
     assert (project.root / "README").read_text() == "toy project\n"
     patch = project.run_dir(record["id"]) / "stray" / "tracked.patch"
-    assert "changed by the run" in patch.read_text()
+    assert written in patch.read_bytes()
     assert project.git("status", "--porcelain") == ""
 
 
@@ -754,6 +797,26 @@ def test_sigterm_reverts_and_releases_the_lock(project: Project) -> None:
         pass
 
 
+def test_a_signal_before_the_experiment_starts_is_recorded_and_reverted(
+    project: Project, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project.run("baseline")
+    parent = project.head()
+    commit_all = cli.commit_all
+
+    def commit_then_signal(root: Path, description: str) -> bool:
+        created = commit_all(root, description)
+        os.kill(os.getpid(), signal.SIGTERM)  # Esc in Claude Code while the run commits
+        return created
+
+    monkeypatch.setattr(cli, "commit_all", commit_then_signal)
+    project.set_x(1)
+    assert project.run("x=1") == 130
+    record = project.records()[-1]
+    assert (record["status"], record["reason"]) == ("crash", "interrupted by SIGTERM")
+    assert project.head() == parent
+
+
 def test_sigkill_is_recovered_by_the_next_run(
     project: Project, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -774,8 +837,36 @@ def test_sigkill_is_recovered_by_the_next_run(
     assert project.head() == parent
     assert (project.root / "x.txt").read_text() == "1\n"
     assert project.records()[-1]["status"] == "crash"
+    project.git("restore", "x.txt")  # what the recovery message suggests
+    assert (project.root / "x.txt").read_text() == "0\n"
+    project.set_x(1)
     assert project.run("next idea") == 0
     assert project.records()[-1]["status"] == "keep"
+
+
+def test_a_kill_between_a_discard_and_its_revert_is_undone_by_the_next_run(
+    project: Project, capsys: pytest.CaptureFixture[str]
+) -> None:
+    project.run("baseline")
+    parent = project.head()
+    project.set_x(10)  # worse than the baseline, so it is discarded
+    die_before_revert = (
+        "import os, signal, sys\n"
+        "from infinit_research import cli\n"
+        "cli.revert = lambda root, trial: os.kill(os.getpid(), signal.SIGKILL)\n"
+        "sys.exit(cli.main(sys.argv[1:]))\n"
+    )
+    command = [sys.executable, "-c", die_before_revert, "run", "-m", "x=10"]
+    killed = subprocess.run(command, cwd=project.root, capture_output=True, check=False)
+    assert killed.returncode == -signal.SIGKILL
+    assert project.records()[-1]["status"] == "discard"
+    assert project.head() != parent
+    assert project.run("next idea") == 2
+    assert "recovered from run #0002" in capsys.readouterr().err
+    assert project.head() == parent
+    assert len(project.records()) == 2  # the verdict is not recorded twice
+    project.git("restore", "x.txt")
+    assert (project.root / "x.txt").read_text() == "0\n"
 
 
 def test_head_moving_during_a_run_is_reported(make: Callable[..., Project]) -> None:
@@ -909,6 +1000,7 @@ def test_a_killed_run_hides_lab_until_status_or_the_next_run(
     assert not (project.root / "lab").exists()
     assert cli.main(["status"]) == 0
     assert_group_dead(int(marker.read_text()))
+    assert json.loads((project.state / "lock").read_text())["pgid"] is None  # killed only once
     assert (project.root / "lab" / "strategy.md").exists()
     project.set_x(1)
     assert project.run("next idea") == 2
@@ -916,7 +1008,7 @@ def test_a_killed_run_hides_lab_until_status_or_the_next_run(
     assert project.records()[-1]["lab"] == project.records()[0]["lab"]
 
 
-def test_a_review_is_due_after_each_window_until_lab_changes(
+def test_a_review_is_due_after_each_window_until_reviews_md_has_its_section(
     project: Project, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     monkeypatch.setattr(report, "WINDOW_RUNS", 2)
@@ -925,10 +1017,11 @@ def test_a_review_is_due_after_each_window_until_lab_changes(
     project.set_x(1)
     project.run("x=1")
     assert "review due" in capsys.readouterr().out
+    write_probe(project, 'echo "quick: 1"\n')  # changing lab/ is not a review
     cli.main(["status"])
     assert "review due" in capsys.readouterr().out
     with (project.root / "lab" / "reviews.md").open("a") as handle:
-        handle.write("## Review after #0002\n")
+        handle.write("## Review after #2\n")  # the run id's leading zeros are optional
     cli.main(["status"])
     assert "review due" not in capsys.readouterr().out
 
@@ -968,9 +1061,17 @@ def test_a_probe_runs_the_agents_evaluation_without_committing(
     (probe,) = cli.read_probes(project.root)
     assert (probe["status"], probe["metrics"], probe["runs"]) == ("ok", {"arg": 7.0}, 1)
     assert (project.state / "lab-versions" / probe["lab"] / "probe.sh").exists()
+    assert 'href="probes/0001/run.log"' in (project.state / "report.html").read_text()
     assert project.head() == head
     assert (project.root / "x.txt").read_text() == "1\n"
     assert len(project.records()) == 1
+
+
+def test_probe_args_after_a_double_dash_reach_the_script_without_it(project: Project) -> None:
+    write_probe(project, 'echo "count: $#"\n[ "$1" = --seed ] && echo "seed: $2"\n')
+    assert cli.main(["probe", "-m", "flags", "--", "--seed", "7"]) == 0
+    (probe,) = cli.read_probes(project.root)
+    assert probe["metrics"] == {"count": 2.0, "seed": 7.0}
 
 
 def test_a_probe_that_writes_into_the_repo_is_undone(project: Project) -> None:

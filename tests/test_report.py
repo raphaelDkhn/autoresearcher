@@ -1,12 +1,13 @@
 """Tests for the HTML report."""
 
-import json
 from pathlib import Path
 
 import pytest
 
 from infinit_research import report
-from infinit_research.cli import Probe, Record
+from infinit_research.cli import Manifest, Probe, Record
+
+MANIFEST = Manifest("loss", "minimize", 0.0, "true", 1.0, ("x.txt",))
 
 
 def record(
@@ -36,7 +37,7 @@ RUNS = [
 
 
 def test_report_has_a_row_and_a_point_per_run(tmp_path: Path) -> None:
-    html = report.write_report(tmp_path, "proj · main", "loss", "minimize", RUNS).read_text()
+    html = report.write_report(tmp_path, "proj · main", MANIFEST, RUNS, []).read_text()
     assert html.split('<table id="runs">')[1].count("<tr><td>") == 4
     assert html.count('class="pt"') == 4
     assert "Change vs baseline" in html and "-55.56%" in html
@@ -44,7 +45,7 @@ def test_report_has_a_row_and_a_point_per_run(tmp_path: Path) -> None:
 
 
 def test_report_escapes_agent_text(tmp_path: Path) -> None:
-    html = report.write_report(tmp_path, "proj", "loss", "minimize", RUNS).read_text()
+    html = report.write_report(tmp_path, "proj", MANIFEST, RUNS, []).read_text()
     assert "<script>alert(1)</script>" not in html
     assert "&lt;script&gt;alert(1)&lt;/script&gt;" in html
 
@@ -54,19 +55,19 @@ def test_report_links_run_artifacts(tmp_path: Path) -> None:
     run_dir.mkdir(parents=True)
     (run_dir / "pred image.png").write_bytes(b"")
     (run_dir / "run.log").write_text("loss: 9\n")
-    html = report.write_report(tmp_path, "proj", "loss", "minimize", RUNS).read_text()
+    html = report.write_report(tmp_path, "proj", MANIFEST, RUNS, []).read_text()
     assert 'src="runs/0001/pred%20image.png"' in html
     assert 'href="runs/0001/run.log"' in html
 
 
 def test_report_without_runs(tmp_path: Path) -> None:
-    html = report.write_report(tmp_path, "proj", "loss", "minimize", []).read_text()
+    html = report.write_report(tmp_path, "proj", MANIFEST, [], []).read_text()
     assert "No runs on this branch yet." in html
 
 
 def test_report_uses_a_log_axis_for_wide_ranges(tmp_path: Path) -> None:
     runs = [record("0001", "keep", 100.0), record("0002", "keep", 1.0)]
-    html = report.write_report(tmp_path, "proj", "loss", "minimize", runs).read_text()
+    html = report.write_report(tmp_path, "proj", MANIFEST, runs, []).read_text()
     assert "(log scale)" in html
 
 
@@ -75,11 +76,16 @@ def test_nice_ticks_are_round_numbers() -> None:
     assert report.nice_ticks(0.95, 1.01) == [0.96, 0.98, 1.0]
 
 
-def probe(probe_id: str, runs: int, description: str = "quick check") -> Probe:
+def probe(
+    probe_id: str,
+    runs: int,
+    description: str = "quick check",
+    branch: str = "infinit-research/oct19",
+) -> Probe:
     return Probe(
         id=probe_id,
         time="2026-10-19T12:00:00+02:00",
-        branch="infinit-research/oct19",
+        branch=branch,
         head="abcdef1234567890",
         lab="aaa",
         runs=runs,
@@ -118,15 +124,14 @@ def test_windows_measure_gain_in_the_goal_direction() -> None:
 
 
 def test_report_shows_the_research_harness_and_any_probes(tmp_path: Path) -> None:
-    without_probes = report.write_report(tmp_path, "proj", "loss", "minimize", RUNS).read_text()
+    without_probes = report.write_report(tmp_path, "proj", MANIFEST, RUNS, []).read_text()
     assert "Research harness" in without_probes and "<h2>Probes</h2>" not in without_probes
     runs = [
         record("0001", "keep", 9.0, lab="3fa2c1d4e5f6"),
         record("0002", "keep", 4.0, lab="3fa2c1d4e5f6"),
     ]
-    probes = [probe("0001", 1, "<b>quick</b>"), {**probe("0002", 1), "branch": "other"}]
-    (tmp_path / "probes.jsonl").write_text("".join(json.dumps(p) + "\n" for p in probes))
-    html = report.write_report(tmp_path, "proj", "loss", "minimize", runs).read_text()
+    probes = [probe("0001", 1, "<b>quick</b>"), probe("0002", 1, branch="other")]
+    html = report.write_report(tmp_path, "proj", MANIFEST, runs, probes).read_text()
     assert "Research harness" in html
     assert 'href="lab-versions/3fa2c1d4e5f6/strategy.md"' in html
     assert "+55.56%" in html

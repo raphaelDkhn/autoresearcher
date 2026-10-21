@@ -101,7 +101,9 @@ def main() -> int:
     if time.monotonic() - start > BUDGET + 5:
         print("fit overran its budget", file=sys.stderr)
         return 1
-    inputs, targets = fresh_eval_set()  # drawn now, after training
+    seed = int.from_bytes(os.urandom(4), "little")  # rule 12: fresh, never from a file
+    print(f"eval_seed: {seed}")
+    inputs, targets = fresh_eval_set(seed)  # drawn now, after training
     predictions = predict(inputs)
     save_pictures(RUN_DIR, predictions, targets)
     print(f"mse: {mean_squared_error(predictions, targets):.8f}")
@@ -125,6 +127,7 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 fn main() {
     // Fresh inputs every run, so the candidate can't be tuned to one dataset.
     let mut seed = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos() as u64 | 1;
+    println!("eval_seed: {seed}");
     let mut next = move || { seed ^= seed << 13; seed ^= seed >> 7; seed ^= seed << 17; seed };
     let mut per_element = Vec::new();
     for _ in 0..30 {

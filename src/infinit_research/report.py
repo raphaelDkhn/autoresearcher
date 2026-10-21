@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import math
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
@@ -12,7 +11,7 @@ from typing import TYPE_CHECKING
 from urllib.parse import quote
 
 if TYPE_CHECKING:
-    from infinit_research.cli import Probe, Record
+    from infinit_research.cli import Manifest, Probe, Record
 
 IMAGE_SUFFIXES = (".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg")
 REFRESH_SECONDS = 30
@@ -157,17 +156,21 @@ if (chart) {
 
 
 def write_report(
-    state_dir: Path, title: str, metric: str, goal: str, records: list[Record]
+    state_dir: Path, title: str, manifest: Manifest, records: list[Record], probes: list[Probe]
 ) -> Path:
     """Render the report for one branch's records and write it atomically."""
     path = state_dir / "report.html"
     partial = path.with_name("report.html.tmp")
-    partial.write_text(render(state_dir, title, metric, goal, records), encoding="utf-8")
+    partial.write_text(render(state_dir, title, manifest, records, probes), encoding="utf-8")
     partial.replace(path)
     return path
 
 
-def render(state_dir: Path, title: str, metric: str, goal: str, records: list[Record]) -> str:
+def render(
+    state_dir: Path, title: str, manifest: Manifest, records: list[Record], probes: list[Probe]
+) -> str:
+    """The report page, showing only the probes on the records' branch."""
+    metric, goal = manifest.metric, manifest.goal
     body = [
         f'<header><h1>{escape(title)}</h1><p class="sub">{escape(goal.capitalize())} '
         f"<code>{escape(metric)}</code> · refreshes every {REFRESH_SECONDS} s</p></header>",
@@ -175,7 +178,7 @@ def render(state_dir: Path, title: str, metric: str, goal: str, records: list[Re
     ]
     if records:
         branch = records[-1]["branch"]
-        probes = [probe for probe in read_probes(state_dir) if probe["branch"] == branch]
+        probes = [probe for probe in probes if probe["branch"] == branch]
         body += [
             stats(metric, records),
             chart_card(metric, goal, records),
@@ -424,14 +427,6 @@ class Window:
     probes: int  # the agent's own evaluations, run while it chose this window's runs
     probe_seconds: float
     labs: tuple[str, ...]  # versions of lab/ that chose the runs, in order
-
-
-def read_probes(state_dir: Path) -> list[Probe]:
-    path = state_dir / "probes.jsonl"
-    if not path.exists():
-        return []
-    lines = path.read_text(encoding="utf-8").splitlines()
-    return [json.loads(line) for line in lines if line.strip()]
 
 
 def windows(
