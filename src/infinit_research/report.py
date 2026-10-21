@@ -17,85 +17,116 @@ if TYPE_CHECKING:
 IMAGE_SUFFIXES = (".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg")
 REFRESH_SECONDS = 30
 WINDOW_RUNS = 10  # recursive mode reviews its research harness after each window of runs
-# Chart geometry in viewBox units; the SVG scales to its container.
-WIDTH, HEIGHT = 760, 300
-LEFT, RIGHT, TOP, BOTTOM = 64, 16, 16, 64
+# Chart geometry in viewBox units; the SVG scales to its card, about 1:1 on a wide window.
+WIDTH, HEIGHT = 1100, 300
+LEFT, RIGHT, TOP, BOTTOM = 56, 16, 16, 48
 LOG_SCALE_RATIO = 10  # switch to a log y axis when kept values span more than this
 MIN_LOG_TICKS = 3
-RUG_OFFSET = 30  # crashes have no metric, so they sit in a band under the x axis
-STATUS_LABELS = {
-    "keep": ("✓", "kept"),
-    "discard": ("·", "discarded"),
-    "crash": ("✕", "crashed"),
-    "timeout": ("✕", "timed out"),
-}
+RUG_OFFSET = 34  # crashes have no metric, so they sit in a band under the x axis
+STATUS_LABELS = {"keep": "kept", "discard": "discarded", "crash": "crashed", "timeout": "timed out"}
 
+# shadcn/ui preset b2VmBIkQS: the Lyra style, zinc colors, fuchsia charts, and Geist.
 STYLE = """
 :root {
   color-scheme: light;
-  --page: #f9f9f7; --surface: #fcfcfb; --ink: #0b0b0b; --ink-2: #52514e; --muted: #898781;
-  --grid: #e1e0d9; --axis: #c3c2b7; --border: rgba(11,11,11,0.10);
-  --best: #2a78d6; --good: #0ca30c; --neutral: #898781; --critical: #d03b3b; --up: #006300;
+  --background: oklch(1 0 0); --foreground: oklch(0.141 0.005 285.823); --card: oklch(1 0 0);
+  --muted: oklch(0.967 0.001 286.375); --muted-foreground: oklch(0.552 0.016 285.938);
+  --primary: oklch(0.21 0.006 285.885); --primary-foreground: oklch(0.985 0 0);
+  --destructive: oklch(0.577 0.245 27.325); --border: oklch(0.92 0.004 286.32);
+  --chart: oklch(0.591 0.293 322.896); --neutral: oklch(0.65 0.012 286);
+  --frame: color-mix(in oklab, var(--foreground) 10%, transparent);
+  --destructive-tint: color-mix(in oklab, var(--destructive) 10%, transparent);
+  --mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
 }
 @media (prefers-color-scheme: dark) {
   :root {
     color-scheme: dark;
-    --page: #0d0d0d; --surface: #1a1a19; --ink: #f0efec; --ink-2: #c3c2b7; --muted: #898781;
-    --grid: #2c2c2a; --axis: #383835; --border: rgba(255,255,255,0.10);
-    --best: #3987e5; --up: #0ca30c;
+    --background: oklch(0.141 0.005 285.823); --foreground: oklch(0.985 0 0);
+    --card: oklch(0.21 0.006 285.885); --muted: oklch(0.274 0.006 286.033);
+    --muted-foreground: oklch(0.705 0.015 286.067);
+    --primary: oklch(0.92 0.004 286.32); --primary-foreground: oklch(0.21 0.006 285.885);
+    --destructive: oklch(0.704 0.191 22.216); --border: oklch(1 0 0 / 10%);
+    --chart: oklch(0.667 0.295 322.15); --neutral: oklch(0.552 0.016 285.938);
+    --destructive-tint: color-mix(in oklab, var(--destructive) 20%, transparent);
   }
 }
 * { box-sizing: border-box; }
-body { margin: 0; background: var(--page); color: var(--ink);
-  font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
-main { max-width: 1100px; margin: 0 auto; padding: 24px 16px 48px; }
-h1 { font-size: 20px; margin: 0 0 4px; }
-h2 { font-size: 15px; margin: 0 0 8px; }
-.sub { color: var(--ink-2); margin: 0 0 20px; }
+body { margin: 0; background: var(--background); color: var(--foreground);
+  font: 12px/1.625 Geist, "Geist Variable", ui-sans-serif, system-ui, sans-serif;
+  -webkit-font-smoothing: antialiased; }
+main { max-width: 1200px; margin: 0 auto; padding: 48px 24px 64px;
+  display: flex; flex-direction: column; gap: 16px; }
+header { margin-bottom: 16px; }
+h1 { font-size: 16px; line-height: 24px; font-weight: 500; margin: 0; }
+h2 { font-size: 14px; line-height: 20px; font-weight: 500; margin: 0; }
+.sub { color: var(--muted-foreground); margin: 2px 0 0; }
+code { font-family: var(--mono); font-size: 11px; }
+.sub code { color: var(--foreground); background: var(--muted); padding: 2px 4px; }
+a { color: inherit; text-underline-offset: 4px; text-decoration-color: var(--border); }
+a:hover { text-decoration-color: currentColor; }
 .skip { position: absolute; left: -9999px; }
-.skip:focus { left: 16px; top: 8px; background: var(--surface); padding: 4px 8px; }
-.stats { display: flex; flex-wrap: wrap; gap: 12px; margin-bottom: 16px; }
-.stat { background: var(--surface); border: 1px solid var(--border); border-radius: 8px;
-  padding: 12px 16px; min-width: 160px; }
-.stat .label { color: var(--ink-2); font-size: 13px; }
-.stat .value { font-size: 24px; font-weight: 600; }
-.stat .value.up { color: var(--up); }
-.card { background: var(--surface); border: 1px solid var(--border); border-radius: 8px;
-  padding: 16px; margin-bottom: 16px; }
-.legend { display: flex; flex-wrap: wrap; gap: 16px; color: var(--ink-2); font-size: 13px;
-  margin: 0 0 8px; padding: 0; list-style: none; }
-.legend svg { vertical-align: middle; margin-right: 6px; }
-svg.chart { width: 100%; height: auto; display: block; }
-.grid line { stroke: var(--grid); stroke-width: 1; }
-.axis { stroke: var(--axis); stroke-width: 1; }
-.tick { fill: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums; }
-.axis-title { fill: var(--ink-2); font-size: 12px; }
-.best { fill: none; stroke: var(--best); stroke-width: 2;
+.skip:focus { left: 16px; top: 8px; background: var(--card); padding: 4px 8px; }
+.stats { display: flex; flex-wrap: wrap; gap: 1px; background: var(--frame);
+  box-shadow: 0 0 0 1px var(--frame); }
+.stat { flex: 1 1 200px; padding: 16px; background: var(--card); }
+.stat .label, .stat .note { color: var(--muted-foreground); }
+.stat .value { font-size: 24px; line-height: 32px; font-weight: 500; letter-spacing: -0.02em;
+  margin-top: 4px; }
+.card { display: flex; flex-direction: column; gap: 16px; padding: 16px 0; overflow: hidden;
+  background: var(--card); box-shadow: 0 0 0 1px var(--frame); }
+.card-header { display: flex; flex-wrap: wrap; align-items: flex-start;
+  justify-content: space-between; gap: 4px 16px; padding: 0 16px; }
+.card-header p { color: var(--muted-foreground); margin: 4px 0 0; }
+.card-content { padding: 0 16px; }
+.legend { display: flex; flex-wrap: wrap; gap: 4px 16px; margin: 0; padding: 0;
+  list-style: none; color: var(--muted-foreground); }
+.legend li { display: flex; align-items: center; gap: 6px; }
+/* --k is viewBox units per pixel, set by the script so text and marks keep their pixel size */
+svg.chart { width: 100%; height: auto; display: block; overflow: visible; }
+.grid line, .axis { stroke: var(--border); stroke-width: 1; }
+.grid line, .axis, .best { vector-effect: non-scaling-stroke; }
+.tick { fill: var(--muted-foreground); font-size: calc(12px * var(--k, 1));
+  font-variant-numeric: tabular-nums; }
+.best { fill: none; stroke: var(--chart); stroke-width: 2;
   stroke-linejoin: round; stroke-linecap: round; }
 .pt { cursor: default; outline: none; }
 .pt .hit { fill: transparent; }
-.pt .mark { transform-box: fill-box; transform-origin: center; transition: transform 80ms; }
-.pt:hover .mark, .pt:focus-visible .mark { transform: scale(1.4); }
-.keep { fill: var(--good); stroke: var(--surface); stroke-width: 2; }
-.discard { fill: var(--neutral); stroke: var(--surface); stroke-width: 2; }
-.fail { stroke: var(--critical); stroke-width: 2; stroke-linecap: round; }
-#tip { position: fixed; pointer-events: none; background: var(--surface); color: var(--ink);
-  border: 1px solid var(--border); border-radius: 6px; padding: 6px 8px; font-size: 12px;
-  max-width: 360px; box-shadow: 0 2px 8px rgba(0,0,0,0.15); }
+.pt .mark, .pt .hit { transform-box: fill-box; transform-origin: center;
+  transform: scale(var(--k, 1)); transition: transform 80ms; }
+.pt:hover .mark, .pt:focus-visible .mark { transform: scale(calc(1.4 * var(--k, 1))); }
+circle.keep { fill: var(--chart); stroke: var(--card); stroke-width: 2; }
+circle.discard { fill: var(--neutral); stroke: var(--card); stroke-width: 2; }
+.fail { stroke: var(--destructive); stroke-width: 2; stroke-linecap: round; }
+#tip { position: fixed; pointer-events: none; min-width: 128px; max-width: 320px;
+  padding: 6px 10px; background: var(--background); color: var(--foreground);
+  border: 1px solid var(--border); line-height: 1.5; white-space: pre-line;
+  box-shadow: 0 20px 25px -5px rgb(0 0 0 / 0.1), 0 8px 10px -6px rgb(0 0 0 / 0.1); }
+#tip::first-line { font-weight: 500; }
 .table-wrap { overflow-x: auto; }
-table { border-collapse: collapse; width: 100%; font-size: 13px; }
-th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--grid);
-  vertical-align: top; }
-th { color: var(--ink-2); font-weight: 600; }
-td.num { font-variant-numeric: tabular-nums; text-align: right; white-space: nowrap; }
-td.status { white-space: nowrap; }
-.icon-keep { color: var(--good); } .icon-discard { color: var(--neutral); }
-.icon-crash, .icon-timeout { color: var(--critical); }
-.reason { color: var(--ink-2); display: block; }
-code { font-size: 12px; }
-.thumbs a { display: inline-block; margin: 0 4px 4px 0; }
-.thumbs img { height: 56px; border-radius: 4px; border: 1px solid var(--border); }
-.empty { color: var(--ink-2); }
+table { border-collapse: collapse; width: 100%; }
+th, td { text-align: left; padding: 8px; border-bottom: 1px solid var(--border);
+  vertical-align: middle; white-space: nowrap; }
+th { height: 40px; font-weight: 500; }
+th:first-child, td:first-child { padding-left: 16px; }
+th:last-child, td:last-child { padding-right: 16px; }
+tbody tr:last-child td { border-bottom: 0; }
+tbody tr:hover { background: color-mix(in oklab, var(--muted) 50%, transparent); }
+.num { font-variant-numeric: tabular-nums; text-align: right; }
+.desc { white-space: normal; min-width: 240px; }
+.reason { color: var(--muted-foreground); display: block; }
+.badge { display: inline-flex; align-items: center; height: 20px; padding: 0 8px;
+  border: 1px solid var(--border); font-weight: 500; white-space: nowrap; }
+.badge.keep { background: var(--primary); color: var(--primary-foreground);
+  border-color: transparent; }
+.badge.discard { color: var(--muted-foreground); }
+.badge.crash, .badge.timeout { background: var(--destructive-tint); color: var(--destructive);
+  border-color: transparent; }
+.thumbs { display: inline-flex; gap: 4px; margin-right: 8px; vertical-align: middle; }
+.thumbs:empty { display: none; }
+.thumbs img { display: block; height: 28px; box-shadow: 0 0 0 1px var(--frame); }
+.empty { color: var(--muted-foreground); text-align: center; margin: 0; padding: 48px 24px;
+  border: 1px dashed var(--border); }
+.card .empty { border: 0; padding: 24px; }
 """
 
 SCRIPT = """
@@ -115,6 +146,13 @@ for (const point of document.querySelectorAll('.pt')) {
   point.addEventListener('focus', show);
   point.addEventListener('blur', hide);
 }
+const chart = document.querySelector('svg.chart');
+if (chart) {
+  new ResizeObserver(() => {
+    const width = chart.getBoundingClientRect().width;
+    if (width) chart.style.setProperty('--k', chart.viewBox.baseVal.width / width);
+  }).observe(chart);
+}
 """
 
 
@@ -131,9 +169,8 @@ def write_report(
 
 def render(state_dir: Path, title: str, metric: str, goal: str, records: list[Record]) -> str:
     body = [
-        f"<h1>{escape(title)}</h1>",
-        f'<p class="sub">{escape(goal)} <code>{escape(metric)}</code> · '
-        f"refreshes every {REFRESH_SECONDS} s</p>",
+        f'<header><h1>{escape(title)}</h1><p class="sub">{escape(goal.capitalize())} '
+        f"<code>{escape(metric)}</code> · refreshes every {REFRESH_SECONDS} s</p></header>",
         '<a class="skip" href="#runs">Skip to the runs table</a>',
     ]
     if records:
@@ -141,7 +178,7 @@ def render(state_dir: Path, title: str, metric: str, goal: str, records: list[Re
         probes = [probe for probe in read_probes(state_dir) if probe["branch"] == branch]
         body += [
             stats(metric, records),
-            chart_card(metric, records),
+            chart_card(metric, goal, records),
             harness_card(records, probes, goal),
             probes_card(probes),
             table(state_dir, metric, records),
@@ -169,31 +206,49 @@ def kept_values(records: Sequence[Record]) -> list[float]:
 def stats(metric: str, records: list[Record]) -> str:
     kept = kept_values(records)
     counts = {status: sum(r["status"] == status for r in records) for status in STATUS_LABELS}
-    tally = ", ".join(f"{n} {STATUS_LABELS[s][1]}" for s, n in counts.items() if n)
-    tiles = [tile(f"Runs ({tally})", str(len(records)))]
+    tally = " · ".join(f"{n} {STATUS_LABELS[s]}" for s, n in counts.items() if n)
+    tiles = [tile("Runs", str(len(records)), tally)]
     if kept:
         tiles.insert(0, tile(f"Best {metric}", fmt(kept[-1])))
         if kept[0] != 0 and len(kept) > 1:
             change = (kept[-1] - kept[0]) / abs(kept[0]) * 100
-            tiles.insert(1, tile("Change vs baseline", f"{change:+.2f}%", "up"))
+            tiles.insert(1, tile("Change vs baseline", f"{change:+.2f}%", f"from {fmt(kept[0])}"))
     return f'<div class="stats">{"".join(tiles)}</div>'
 
 
-def tile(label: str, value: str, tone: str = "") -> str:
+def tile(label: str, value: str, note: str = "") -> str:
     return (
         f'<div class="stat"><div class="label">{escape(label)}</div>'
-        f'<div class="value {tone}">{escape(value)}</div></div>'
+        f'<div class="value">{escape(value)}</div><div class="note">{escape(note)}</div></div>'
     )
+
+
+def card(title: str, description: str, content: str, action: str = "") -> str:
+    return (
+        f'<div class="card"><div class="card-header"><div><h2>{escape(title)}</h2>'
+        f"<p>{escape(description)}</p></div>{action}</div>{content}</div>"
+    )
+
+
+def badge(status: str) -> str:
+    label = STATUS_LABELS.get(status, status)
+    return f'<span class="badge {escape(status)}">{escape(label)}</span>'
 
 
 # Chart --------------------------------------------------------------------------------
 
 
-def chart_card(metric: str, records: list[Record]) -> str:
+def chart_card(metric: str, goal: str, records: list[Record]) -> str:
     kept = kept_values(records)
+    scale = " (log scale)" if kept and domain(kept)[2] else ""
+    better = "lower" if goal == "minimize" else "higher"
+    description = f"{metric} by run{scale}, {better} is better"
     if not kept:
-        return '<div class="card"><p class="empty">No baseline yet, so nothing to plot.</p></div>'
-    return f'<div class="card">{legend()}{chart(metric, records, kept)}</div>'
+        return card(
+            "Progress", description, '<p class="empty">No baseline yet, so nothing to plot.</p>'
+        )
+    content = f'<div class="card-content">{chart(metric, records, kept)}</div>'
+    return card("Progress", description, content, legend())
 
 
 def legend() -> str:
@@ -270,7 +325,7 @@ def log_ticks(lo: float, hi: float) -> list[float]:
     return ticks
 
 
-def axes(metric: str, count: int, lo: float, hi: float, log: bool) -> str:
+def axes(count: int, lo: float, hi: float, log: bool) -> str:
     y = y_scale(lo, hi, log)
     x = x_scale(count)
     bottom = HEIGHT - BOTTOM
@@ -280,25 +335,18 @@ def axes(metric: str, count: int, lo: float, hi: float, log: bool) -> str:
             f'<line x1="{LEFT}" x2="{WIDTH - RIGHT}" y1="{y(value):.1f}" y2="{y(value):.1f}"/>'
         )
         parts.append(
-            f'<text class="tick" x="{LEFT - 8}" y="{y(value) + 4:.1f}" text-anchor="end">'
+            f'<text class="tick" x="{LEFT - 8}" y="{y(value):.1f}" dy="0.35em" text-anchor="end">'
             f"{fmt(value)}</text>"
         )
     parts.append("</g>")
     # Run numbers are integers, so only use steps of 1, 2, or 5 times a power of ten.
     for run in sorted({int(t) for t in nice_ticks(0, max(count, 2), 5, (1, 2, 5, 10)) if t >= 1}):
         parts.append(
-            f'<text class="tick" x="{x(run):.1f}" y="{bottom + 16}" text-anchor="middle">'
+            f'<text class="tick" x="{x(run):.1f}" y="{bottom}" dy="1.3em" text-anchor="middle">'
             f"{run}</text>"
         )
     parts.append(
         f'<line class="axis" x1="{LEFT}" x2="{WIDTH - RIGHT}" y1="{bottom}" y2="{bottom}"/>'
-    )
-    parts.append(
-        f'<text class="axis-title" x="{(LEFT + WIDTH - RIGHT) / 2}" y="{HEIGHT - 6}" '
-        f'text-anchor="middle">run</text>'
-        f'<text class="axis-title" x="14" y="{TOP + (HEIGHT - TOP - BOTTOM) / 2}" '
-        f'text-anchor="middle" transform="rotate(-90 14 {TOP + (HEIGHT - TOP - BOTTOM) / 2})">'
-        f"{escape(metric)}{' (log scale)' if log else ''}</text>"
     )
     return "".join(parts)
 
@@ -310,7 +358,7 @@ def chart(metric: str, records: list[Record], kept: list[float]) -> str:
     return (
         f'<svg class="chart" viewBox="0 0 {WIDTH} {HEIGHT}" role="group" '
         f'aria-label="Progress of {escape(metric)} over {len(records)} runs">'
-        f"{axes(metric, len(records), lo, hi, log)}{best_svg(records, x, y)}{''.join(points)}</svg>"
+        f"{axes(len(records), lo, hi, log)}{best_svg(records, x, y)}{''.join(points)}</svg>"
     )
 
 
@@ -335,11 +383,11 @@ def point(
     x: Callable[[int], float],
     y: Callable[[float], float],
 ) -> str:
-    label = STATUS_LABELS.get(record["status"], ("?", record["status"]))[1]
+    label = STATUS_LABELS.get(record["status"], record["status"])
     value = record["metric"]
-    tip = f"#{record['id']} {label} · "
+    tip = f"#{record['id']} {label}\n"  # the tooltip shows one line per part
     tip += f"{metric} {fmt(value)}" if value is not None else (record["reason"] or "no metric")
-    tip += f" · {record['description']}"
+    tip += f"\n{record['description']}"
     cx = x(index)
     if value is None:
         cy = HEIGHT - BOTTOM + RUG_OFFSET
@@ -441,13 +489,15 @@ def harness_card(records: list[Record], probes: list[Probe], goal: str) -> str:
             f'<td class="num">{window.gain:+.2%}</td><td class="num">{per_hour}</td>'
             f"<td>{labs}</td></tr>"
         )
-    return (
-        '<div class="card"><h2>Research harness</h2><div class="table-wrap"><table>'
+    return card(
+        "Research harness",
+        f"Each window of {WINDOW_RUNS} runs and the version of lab/ that chose them",
+        '<div class="table-wrap"><table>'
         '<caption class="skip">Each window of runs and the research harness behind it</caption>'
         '<thead><tr><th>Runs</th><th class="num">Kept</th><th class="num">Failed</th>'
         '<th class="num">Probes</th><th class="num">Gain</th>'
         '<th class="num">Gain per compute-hour</th><th>Lab versions</th></tr></thead>'
-        f"<tbody>{''.join(rows)}</tbody></table></div></div>"
+        f"<tbody>{''.join(rows)}</tbody></table></div>",
     )
 
 
@@ -460,19 +510,21 @@ def probes_card(probes: list[Probe]) -> str:
         reason = f'<span class="reason">{escape(probe["reason"])}</span>' if probe["reason"] else ""
         log = f"probes/{quote(probe['id'])}/run.log"
         rows.append(
-            f"<tr><td>#{escape(probe['id'])}</td><td>{escape(probe['status'])}</td>"
+            f"<tr><td>#{escape(probe['id'])}</td><td>{badge(probe['status'])}</td>"
             f"<td><code>{escape(results)}</code></td>"
             f'<td class="num">{probe["seconds"]:g}</td>'
-            f"<td>{escape(probe['description'])}{reason}</td>"
+            f'<td class="desc">{escape(probe["description"])}{reason}</td>'
             f"<td><code>{escape(probe['lab'][:7])}</code></td>"
             f'<td><a href="{escape(log)}">log</a></td></tr>'
         )
-    return (
-        '<div class="card"><h2>Probes</h2><div class="table-wrap"><table>'
+    return card(
+        "Probes",
+        "The agent's own evaluations, newest first",
+        '<div class="table-wrap"><table>'
         '<caption class="skip">The agent\'s own evaluations, newest first</caption>'
         '<thead><tr><th>Probe</th><th>Status</th><th>Results</th><th class="num">Seconds</th>'
         "<th>What it checked</th><th>Lab</th><th>Log</th></tr></thead>"
-        f"<tbody>{''.join(rows)}</tbody></table></div></div>"
+        f"<tbody>{''.join(rows)}</tbody></table></div>",
     )
 
 
@@ -483,30 +535,28 @@ def table(state_dir: Path, metric: str, records: list[Record]) -> str:
     kept = kept_values(records)
     baseline = kept[0] if kept else None
     rows = [row(state_dir, r, baseline) for r in reversed(records)]
-    return (
-        '<div class="card"><div class="table-wrap"><table id="runs">'
-        f'<caption class="skip">All runs, newest first</caption><thead><tr><th>Run</th>'
+    return card(
+        "Runs",
+        "All runs, newest first",
+        '<div class="table-wrap"><table id="runs">'
+        '<caption class="skip">All runs, newest first</caption><thead><tr><th>Run</th>'
         f'<th>Status</th><th class="num">{escape(metric)}</th><th class="num">vs baseline</th>'
         '<th class="num">Seconds</th><th>What was tried</th><th>Commit</th><th>Artifacts</th>'
-        f"</tr></thead><tbody>{''.join(rows)}</tbody></table></div></div>"
+        f"</tr></thead><tbody>{''.join(rows)}</tbody></table></div>",
     )
 
 
 def row(state_dir: Path, record: Record, baseline: float | None) -> str:
-    icon, label = STATUS_LABELS.get(record["status"], ("?", record["status"]))
     value = record["metric"]
     change = ""
     if value is not None and baseline:
         change = f"{(value - baseline) / abs(baseline) * 100:+.2f}%"
     reason = f'<span class="reason">{escape(record["reason"])}</span>' if record["reason"] else ""
     return (
-        f"<tr><td>#{escape(record['id'])}</td>"
-        f'<td class="status"><span class="icon-{escape(record["status"])}" aria-hidden="true">'
-        f"{icon}</span> "
-        f"{escape(label)}</td>"
+        f"<tr><td>#{escape(record['id'])}</td><td>{badge(record['status'])}</td>"
         f'<td class="num">{fmt(value) if value is not None else "&ndash;"}</td>'
         f'<td class="num">{change}</td><td class="num">{record["seconds"]:g}</td>'
-        f"<td>{escape(record['description'])}{reason}</td>"
+        f'<td class="desc">{escape(record["description"])}{reason}</td>'
         f"<td><code>{escape(record['commit'][:7])}</code></td>"
         f"<td>{artifacts(state_dir, record['id'])}</td></tr>"
     )
